@@ -10,5 +10,6 @@ data class TransactionEntity(
     val merchant: String,
     val date: String,
     val type: String,
-    val sourceSmsHash: String // the hash to tie it back to the SMS
+    val sourceSmsHash: String, // the hash to tie it back to the SMS
+    val timestamp: Long = System.currentTimeMillis()
 )

@@ -7,6 +7,7 @@ import android.provider.Telephony
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.oracle.ee.spentanalyser.data.datasource.SmsInboxDataSourceImpl
 import com.oracle.ee.spentanalyser.worker.SmsParsingWorker
 import timber.log.Timber
 
@@ -20,9 +21,8 @@ class SmsReceiver : BroadcastReceiver() {
                     val body = sms.displayMessageBody ?: ""
                     Timber.d("Received SMS from: %s, Body: %s", sender, body)
                     
-                    // Utilize shared constants from SmsRepository to match rules
-                    val isBankSender = SmsRepository.KNOWN_BANK_SENDERS.any { sender.contains(it, ignoreCase = true) }
-                    val hasKeyword = SmsRepository.TRANSACTION_KEYWORDS.any { body.contains(it, ignoreCase = true) }
+                    val isBankSender = SmsInboxDataSourceImpl.KNOWN_BANK_SENDERS.any { sender.contains(it, ignoreCase = true) }
+                    val hasKeyword = SmsInboxDataSourceImpl.TRANSACTION_KEYWORDS.any { body.contains(it, ignoreCase = true) }
                     
                     if (isBankSender && hasKeyword) {
                         Timber.d("Bank message detected from %s. Enqueueing parsing worker.", sender)

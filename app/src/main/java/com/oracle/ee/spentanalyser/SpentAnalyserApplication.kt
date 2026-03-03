@@ -35,7 +35,7 @@ class SpentAnalyserApplication : Application() {
             .setRequiresDeviceIdle(true) // Ensure user isn't actively using the phone
             .build()
             
-        val workRequest = PeriodicWorkRequestBuilder<SmsParsingWorker>(6, TimeUnit.HOURS)
+        val workRequest = PeriodicWorkRequestBuilder<SmsParsingWorker>(1, TimeUnit.HOURS)
             .setConstraints(constraints)
             .build()
             

@@ -1,32 +1,20 @@
-package com.oracle.ee.spentanalyser.data
+package com.oracle.ee.spentanalyser.data.datasource
 
 import android.content.Context
-import com.oracle.ee.spentanalyser.data.database.AppDao
-import com.oracle.ee.spentanalyser.data.database.ParseStatus
+import com.oracle.ee.spentanalyser.data.SmsMessage
 import com.oracle.ee.spentanalyser.data.database.PreferencesManager
-import com.oracle.ee.spentanalyser.data.database.SmsLogEntity
 import kotlinx.coroutines.flow.first
 import timber.log.Timber
 import java.security.MessageDigest
 
-data class SmsMessage(
-    val uniqueHash: String,
-    val sender: String,
-    val body: String,
-    val timestamp: Long
-)
-
-class SmsRepository(
+class SmsInboxDataSourceImpl(
     private val context: Context,
-    private val appDao: AppDao,
+    private val appDao: com.oracle.ee.spentanalyser.data.database.AppDao,
     private val preferencesManager: PreferencesManager
-) {
-    
-    companion object {
-        // Constant list of Bank Sender IDs (Extendable)
-        val KNOWN_BANK_SENDERS = listOf("AXISBK", "HDFCBK", "ICICIB", "SBINB", "SBI", "PNB")
+) : SmsInboxDataSource {
 
-        // Keywords to aggressively filter in SQLite before fetching into memory
+    companion object {
+        val KNOWN_BANK_SENDERS = listOf("AXISBK", "HDFCBK", "ICICIB", "SBINB", "SBI", "PNB")
         val TRANSACTION_KEYWORDS = listOf("debited", "debit", "credited", "credit", "spent", "available bal")
 
         fun generateHash(sender: String, body: String, timestamp: Long): String {
@@ -36,27 +24,27 @@ class SmsRepository(
         }
     }
 
-    suspend fun readRecentBankSms(limit: Int = 10): List<SmsMessage> {
-        val lastProcessedTime = preferencesManager.lastProcessedTimestampFlow.first()
+    override suspend fun readRecentBankSms(limit: Int): List<SmsMessage> {
+        var lastProcessedTime = preferencesManager.lastProcessedTimestampFlow.first()
+
+        if (lastProcessedTime == 0L) {
+            lastProcessedTime = System.currentTimeMillis() - (10L * 24 * 60 * 60 * 1000)
+            Timber.d("First run detected. Setting last processed time to 10 days ago.")
+        }
+
         Timber.d("Reading recent SMS messages since timestamp: $lastProcessedTime")
-        
+
         val messages = mutableListOf<SmsMessage>()
         var newestSmsTimestamp = lastProcessedTime
-        
+
         try {
-            // Build the SQL selection arguments
-            // 1. Must be newer than our last synced SMS (minus 1 second for overlap/drift).
-            // 2. Must be from a known bank sender.
-            // 3. Must contain transactional keywords.
-            
             val selectionArgsList = mutableListOf<String>()
-            // Subtract 1000ms to combat millisecond overlaps
             val safeSearchTime = if (lastProcessedTime > 1000L) lastProcessedTime - 1000L else 0L
             selectionArgsList.add(safeSearchTime.toString())
 
-            val senderClauses = KNOWN_BANK_SENDERS.joinToString(" OR ") { 
+            val senderClauses = KNOWN_BANK_SENDERS.joinToString(" OR ") {
                 selectionArgsList.add("%$it%")
-                "${android.provider.Telephony.Sms.Inbox.ADDRESS} LIKE ?" 
+                "${android.provider.Telephony.Sms.Inbox.ADDRESS} LIKE ?"
             }
 
             val keywordClauses = TRANSACTION_KEYWORDS.joinToString(" OR ") {
@@ -65,7 +53,7 @@ class SmsRepository(
             }
 
             val selection = "${android.provider.Telephony.Sms.Inbox.DATE} >= ? AND ($senderClauses) AND ($keywordClauses)"
-            val sortOrder = "${android.provider.Telephony.Sms.Inbox.DATE} DESC LIMIT $limit"
+            val sortOrder = "${android.provider.Telephony.Sms.Inbox.DATE} ASC LIMIT $limit"
 
             val cursor = context.contentResolver.query(
                 android.provider.Telephony.Sms.Inbox.CONTENT_URI,
@@ -89,28 +77,25 @@ class SmsRepository(
                     val sender = it.getString(addressColumn) ?: ""
                     val body = it.getString(bodyColumn) ?: ""
                     val date = it.getLong(dateColumn)
-                    
+
                     if (date > newestSmsTimestamp) {
                         newestSmsTimestamp = date
                     }
 
                     val hash = generateHash(sender, body, date)
 
-                    // Skip if already parsed/logged/ignored in DB
-                    // Because we use Date > lastProcessed check natively, we should very rarely hit this duplicate check.
                     if (appDao.doesSmsLogExist(hash)) {
                         continue
                     }
-                    
+
                     messages.add(SmsMessage(hash, sender, body, date))
                 }
             }
-            
-            // Persist the newest processed timestamp so the next run skips these entirely
+
             if (newestSmsTimestamp > lastProcessedTime) {
                 preferencesManager.updateLastProcessedTimestamp(newestSmsTimestamp)
             }
-            
+
         } catch (e: Exception) {
             Timber.e(e, "Error reading SMS using optimized ContentResolver queries")
         }

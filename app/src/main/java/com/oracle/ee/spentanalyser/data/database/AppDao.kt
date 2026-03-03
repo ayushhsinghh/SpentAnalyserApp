@@ -22,6 +22,9 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransaction(transaction: TransactionEntity): Long
     
+    @Query("DELETE FROM transactions WHERE id = :id")
+    suspend fun deleteTransaction(id: Int)
+    
     // --- SMS Logs ---
     @Query("SELECT * FROM sms_logs ORDER BY timestamp DESC")
     fun getAllSmsLogsFlow(): Flow<List<SmsLogEntity>>
@@ -34,4 +37,10 @@ interface AppDao {
     
     @Query("SELECT EXISTS(SELECT 1 FROM sms_logs WHERE uniqueHash = :hash)")
     suspend fun doesSmsLogExist(hash: String): Boolean
+    
+    @androidx.room.Update
+    suspend fun updateTransaction(transaction: TransactionEntity)
+
+    @Query("UPDATE sms_logs SET status = :status WHERE uniqueHash = :hash")
+    suspend fun updateSmsLogStatus(hash: String, status: String)
 }

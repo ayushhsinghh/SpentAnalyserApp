@@ -4,9 +4,6 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.oracle.ee.spentanalyser.SpentAnalyserApplication
-import com.oracle.ee.spentanalyser.data.database.ParseStatus
-import com.oracle.ee.spentanalyser.data.database.SmsLogEntity
-import com.oracle.ee.spentanalyser.data.database.TransactionEntity
 import timber.log.Timber
 
 class SmsParsingWorker(
@@ -17,50 +14,25 @@ class SmsParsingWorker(
     override suspend fun doWork(): Result {
         Timber.d("SmsParsingWorker started")
         val container = (applicationContext as SpentAnalyserApplication).container
-        val smsRepo = container.smsRepository
-        val llmRepo = container.llmInferenceRepository
-        val appDao = container.appDao
+        val llmEngine = container.llmEngine
 
-        if (!llmRepo.isModelAvailable()) {
-            Timber.w("Worker ending: LLM Model not downloaded yet.")
+        if (!llmEngine.isInitialized()) {
+            Timber.w("Worker ending: LLM engine not initialized (no model active).")
             return Result.success()
         }
 
-        try {
-            val newMessages = smsRepo.readRecentBankSms(limit = 10)
-            
-            if (newMessages.isEmpty()) {
-                Timber.d("Worker ending: No new bank SMS to parse.")
-                return Result.success()
-            }
-
-            llmRepo.initializeModel()
-
-            for (msg in newMessages) {
-                Timber.d("Worker parsing SMS: ${msg.uniqueHash}")
-                val attempt = llmRepo.parseSms(msg.body)
-                
-                if (attempt.success && attempt.data != null) {
-                    appDao.insertTransaction(
-                        TransactionEntity(
-                            amount = attempt.data.amount,
-                            merchant = attempt.data.merchant,
-                            date = attempt.data.date,
-                            type = attempt.data.type,
-                            sourceSmsHash = msg.uniqueHash
-                        )
-                    )
-                    appDao.insertSmsLog(SmsLogEntity(msg.uniqueHash, msg.sender, msg.body, msg.timestamp, ParseStatus.SUCCESS.name, rawLlmOutput = attempt.rawOutput))
-                } else {
-                    appDao.insertSmsLog(SmsLogEntity(msg.uniqueHash, msg.sender, msg.body, msg.timestamp, ParseStatus.ERROR.name, errorMessage = attempt.error, rawLlmOutput = attempt.rawOutput))
-                }
-            }
+        return try {
+            container.systemMonitor.setCurrentTask("Background SMS parsing…")
+            container.parseSmsUseCase.invoke(limit = 50)
+            container.systemMonitor.setCurrentTask("Idle")
 
             Timber.d("SmsParsingWorker finished successfully")
-            return Result.success()
+            Result.success()
         } catch (e: Exception) {
             Timber.e(e, "Worker failed to process SMS")
-            return Result.retry()
+            container.systemMonitor.setCurrentTask("Idle")
+            container.systemMonitor.recordInference(success = false, error = e.message)
+            Result.retry()
         }
     }
 }
