@@ -9,6 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -129,7 +131,33 @@ class ModelRepositoryImpl(
     }
 
     override suspend fun setActiveModel(modelId: String) {
-        preferencesManager.setActiveModelId(modelId)
+        val model = _cachedModels.value.find { it.id == modelId }
+        if (model != null) {
+            preferencesManager.setActiveModel(modelId, model.fileName)
+        } else {
+            Timber.w("Model ID %s not found in cache. Cannot set as active and save filename.", modelId)
+        }
+    }
+
+    override suspend fun autoInitializeEngine(engine: com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine) {
+        if (engine.isInitialized()) return
+
+        val fileName = preferencesManager.activeModelFileNameFlow.firstOrNull()
+        val useGpu = preferencesManager.useGpuFlow.first()
+
+        if (!fileName.isNullOrEmpty()) {
+            val file = File(context.filesDir, fileName)
+            if (file.exists() && file.length() > 0) {
+                try {
+                    engine.initialize(file.absolutePath, useGpu)
+                    Timber.d("Auto-initialized engine with model: %s", fileName)
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to auto-initialize engine on startup")
+                }
+            } else {
+                Timber.w("Saved active model file not found: %s", fileName)
+            }
+        }
     }
 
     override fun getActiveModelFlow(): Flow<LlmModel?> {

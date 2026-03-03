@@ -18,7 +18,9 @@ class PreferencesManager(private val context: Context) {
     companion object {
         val LAST_PROCESSED_TIMESTAMP = longPreferencesKey("last_processed_timestamp")
         val ACTIVE_MODEL_ID = stringPreferencesKey("active_model_id")
+        val ACTIVE_MODEL_FILE_NAME = stringPreferencesKey("active_model_file_name")
         val USE_GPU = booleanPreferencesKey("use_gpu")
+        val AUTO_PARSING_ENABLED = booleanPreferencesKey("auto_parsing_enabled")
     }
 
     // ── SMS Parsing ──
@@ -38,10 +40,16 @@ class PreferencesManager(private val context: Context) {
         .map { preferences ->
             preferences[ACTIVE_MODEL_ID]
         }
+        
+    val activeModelFileNameFlow: Flow<String?> = context.dataStore.data
+        .map { preferences ->
+            preferences[ACTIVE_MODEL_FILE_NAME]
+        }
 
-    suspend fun setActiveModelId(modelId: String) {
+    suspend fun setActiveModel(modelId: String, fileName: String) {
         context.dataStore.edit { preferences ->
             preferences[ACTIVE_MODEL_ID] = modelId
+            preferences[ACTIVE_MODEL_FILE_NAME] = fileName
         }
     }
 
@@ -53,6 +61,18 @@ class PreferencesManager(private val context: Context) {
     suspend fun setUseGpu(useGpu: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[USE_GPU] = useGpu
+        }
+    }
+
+    // ── App Settings ──
+    val isAutoParsingEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[AUTO_PARSING_ENABLED] ?: true // Default to true
+        }
+
+    suspend fun setAutoParsingEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[AUTO_PARSING_ENABLED] = enabled
         }
     }
 }

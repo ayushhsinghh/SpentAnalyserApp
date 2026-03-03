@@ -9,8 +9,8 @@ import kotlinx.serialization.Serializable
 data class TransactionData(
     val amount: Double,
     val merchant: String,
-    val date: String,
-    val type: String // E.g: "DEBIT", "CREDIT"
+    val type: String, // E.g: "DEBIT", "CREDIT"
+    val date: String? = null
 )
 
 /**

@@ -16,7 +16,8 @@ import timber.log.Timber
 
 class ModelsViewModel(
     private val modelRepository: ModelRepositoryImpl,
-    private val llmEngine: LlmInferenceEngine
+    private val llmEngine: LlmInferenceEngine,
+    private val workManager: androidx.work.WorkManager
 ) : ViewModel() {
 
     private val _localState = MutableStateFlow(ModelsUiState())
@@ -96,6 +97,18 @@ class ModelsViewModel(
 
                 _localState.update { it.copy(initializingModelId = null) }
                 Timber.d("Model activated: %s (GPU=%s)", model.name, useGpu)
+                
+                // Immediately trigger background SMS parsing to catch up on unparsed messages
+                val workRequest = androidx.work.OneTimeWorkRequestBuilder<com.oracle.ee.spentanalyser.worker.SmsParsingWorker>()
+                    .setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    .build()
+                workManager.enqueueUniqueWork(
+                    "ImmediateSmsParse",
+                    androidx.work.ExistingWorkPolicy.REPLACE,
+                    workRequest
+                )
+                Timber.d("Enqueued immediate SMS parsing worker after model activation.")
+                
             } catch (e: Exception) {
                 Timber.e(e, "Failed to activate model: %s", model.name)
                 _localState.update {

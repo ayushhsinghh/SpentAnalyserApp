@@ -24,4 +24,16 @@ class SmsLogRepositoryImpl(
 
     override suspend fun updateSmsLogStatus(hash: String, status: ParseStatus) =
         appDao.updateSmsLogStatus(hash, status.name)
+
+    override suspend fun getSmsLogByHash(hash: String): SmsLog? {
+        return appDao.getSmsLogByHash(hash)?.let { entity ->
+            SmsLog(
+                uniqueHash = entity.uniqueHash,
+                sender = entity.sender,
+                body = entity.body,
+                timestamp = entity.timestamp,
+                status = ParseStatus.valueOf(entity.status)
+            )
+        }
+    }
 }

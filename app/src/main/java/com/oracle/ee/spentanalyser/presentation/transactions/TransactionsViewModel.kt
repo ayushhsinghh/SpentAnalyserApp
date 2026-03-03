@@ -11,7 +11,8 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 class TransactionsViewModel(
-    private val transactionRepository: TransactionRepository
+    private val transactionRepository: TransactionRepository,
+    private val smsLogRepository: com.oracle.ee.spentanalyser.domain.repository.SmsLogRepository
 ) : ViewModel() {
 
     val transactions: StateFlow<List<Transaction>> =
@@ -35,6 +36,15 @@ class TransactionsViewModel(
             } catch (e: Exception) {
                 Timber.e(e, "Error deleting transaction")
             }
+        }
+    }
+
+    suspend fun getSourceSms(hash: String): com.oracle.ee.spentanalyser.domain.model.SmsLog? {
+        return try {
+            smsLogRepository.getSmsLogByHash(hash)
+        } catch (e: Exception) {
+            Timber.e(e, "Error fetching source SMS for hash: $hash")
+            null
         }
     }
 }

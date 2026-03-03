@@ -25,7 +25,7 @@ class AppContainer(private val context: Context) {
     val workManager by lazy { androidx.work.WorkManager.getInstance(context) }
 
     // Engine (singleton — shared across ViewModels and Worker)
-    val llmEngine: LlmInferenceEngine by lazy { MediaPipeLlmEngine(context) }
+    val llmEngine: LlmInferenceEngine by lazy { com.oracle.ee.spentanalyser.data.engine.DelegatingLlmEngine(context) }
 
     // Data Sources
     val smsInboxDataSource: SmsInboxDataSource by lazy {
@@ -48,7 +48,11 @@ class AppContainer(private val context: Context) {
 
     // Monitor
     val systemMonitor: SystemMonitor by lazy {
-        SystemMonitor(llmEngine, modelRepository)
+        SystemMonitor(
+            context = context,
+            llmEngine = llmEngine,
+            modelRepository = modelRepository
+        )
     }
 
     // Use Cases

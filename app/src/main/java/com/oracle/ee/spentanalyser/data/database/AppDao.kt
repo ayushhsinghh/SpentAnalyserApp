@@ -38,6 +38,9 @@ interface AppDao {
     @Query("SELECT EXISTS(SELECT 1 FROM sms_logs WHERE uniqueHash = :hash)")
     suspend fun doesSmsLogExist(hash: String): Boolean
     
+    @Query("SELECT * FROM sms_logs WHERE uniqueHash = :hash LIMIT 1")
+    suspend fun getSmsLogByHash(hash: String): SmsLogEntity?
+    
     @androidx.room.Update
     suspend fun updateTransaction(transaction: TransactionEntity)
 

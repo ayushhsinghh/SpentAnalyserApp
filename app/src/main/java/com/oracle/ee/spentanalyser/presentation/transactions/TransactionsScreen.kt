@@ -3,8 +3,7 @@ package com.oracle.ee.spentanalyser.presentation.transactions
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,11 +17,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -32,11 +30,12 @@ import com.oracle.ee.spentanalyser.domain.model.Transaction
 import com.oracle.ee.spentanalyser.presentation.common.EmptyStateView
 import com.oracle.ee.spentanalyser.presentation.common.TransactionEditDialog
 import com.oracle.ee.spentanalyser.ui.theme.SpentAnalyserThemeExtensions
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Modifier) {
     val transactions by viewModel.transactions.collectAsState()
@@ -63,6 +62,10 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
         },
         modifier = modifier
     ) { paddingValues ->
+        val scope = rememberCoroutineScope()
+        var selectedTransaction by remember { mutableStateOf<Transaction?>(null) }
+        var selectedTransactionSms by remember { mutableStateOf<String?>(null) }
+        var isFetchingSms by remember { mutableStateOf(false) }
         var editingTransaction by remember { mutableStateOf<Transaction?>(null) }
         var deletingTransaction by remember { mutableStateOf<Transaction?>(null) }
 
@@ -90,14 +93,92 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
                 ) { transaction ->
                     TransactionCard(
                         transaction = transaction,
-                        onEditClick = { editingTransaction = transaction },
+                        onClick = {
+                            selectedTransaction = transaction
+                            isFetchingSms = true
+                            scope.launch {
+                                val sms = viewModel.getSourceSms(transaction.sourceSmsHash)
+                                selectedTransactionSms = sms?.body
+                                isFetchingSms = false
+                            }
+                        },
                         modifier = Modifier.animateItem()
                     )
                 }
             }
         }
 
-        // Edit dialog
+        // Unified SMS Details & Actions Dialog
+
+        selectedTransaction?.let { tx ->
+            if (isFetchingSms) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    title = { Text("Loading Details") },
+                    text = { CircularProgressIndicator() },
+                    confirmButton = {}
+                )
+            } else {
+                AlertDialog(
+                    onDismissRequest = {
+                        selectedTransaction = null
+                        selectedTransactionSms = null
+                    },
+                    icon = { Icon(Icons.AutoMirrored.Filled.ReceiptLong, contentDescription = null) },
+                    title = { Text("Transaction Details") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Text(
+                                text = "Source SMS",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = selectedTransactionSms ?: "SMS body not found.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(12.dp)
+                                )
+                            }
+                            
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Parsed Data",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                Text("Merchant: \n${tx.merchant}", style = MaterialTheme.typography.bodySmall)
+                                Text("Amount: \n₹${"%.2f".format(tx.amount)}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            editingTransaction = tx
+                            selectedTransaction = null
+                            selectedTransactionSms = null
+                        }) {
+                            Text("Edit")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { deletingTransaction = tx },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Text("Delete")
+                        }
+                    }
+                )
+            }
+        }
+
+        // Edit dialog (Triggered from Details Dialog)
         editingTransaction?.let { tx ->
             TransactionEditDialog(
                 initialAmount = tx.amount.toString(),
@@ -132,6 +213,7 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
                         onClick = {
                             viewModel.deleteTransaction(tx.id)
                             deletingTransaction = null
+                            selectedTransaction = null
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                     ) {
@@ -148,11 +230,10 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TransactionCard(
     transaction: Transaction,
-    onEditClick: () -> Unit = {},
+    onClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val financeColors = SpentAnalyserThemeExtensions.financeColors
@@ -163,18 +244,10 @@ fun TransactionCard(
     val timeSdf = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
     val formattedTime = timeSdf.format(Date(transaction.timestamp))
 
-    val haptic = LocalHapticFeedback.current
-
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .combinedClickable(
-                onClick = {},
-                onLongClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onEditClick()
-                }
-            )
+            .clickable(onClick = onClick)
             .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -228,12 +301,6 @@ fun TransactionCard(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     color = amountColor
-                )
-                // Visual hint for long-press edit
-                Text(
-                    text = "Hold to edit",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                 )
             }
         }

@@ -2,9 +2,11 @@ package com.oracle.ee.spentanalyser.presentation.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine
 import com.oracle.ee.spentanalyser.domain.model.Transaction
+import com.oracle.ee.spentanalyser.domain.repository.ModelRepository
 import com.oracle.ee.spentanalyser.domain.repository.TransactionRepository
 import com.oracle.ee.spentanalyser.domain.usecase.ParseSmsUseCase
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -27,6 +29,7 @@ import java.util.Calendar
  */
 class DashboardViewModel(
     private val transactionRepository: TransactionRepository,
+    private val modelRepository: ModelRepository,
     private val llmEngine: LlmInferenceEngine,
     private val parseSmsUseCase: ParseSmsUseCase,
     private val workManager: WorkManager
@@ -101,7 +104,11 @@ class DashboardViewModel(
     }
 
     init {
-        checkEngineState()
+        viewModelScope.launch {
+            _uiState.update { it.copy(aiModelState = AiModelState.CHECKING) }
+            modelRepository.autoInitializeEngine(llmEngine)
+            checkEngineState()
+        }
         observeWorkManager()
     }
 
@@ -112,14 +119,29 @@ class DashboardViewModel(
 
             combine(immediateFlow, periodicFlow) { immediate, periodic ->
                 val allInfos = immediate + periodic
-                when {
-                    allInfos.any { it.state == androidx.work.WorkInfo.State.RUNNING } -> androidx.work.WorkInfo.State.RUNNING
-                    allInfos.any { it.state == androidx.work.WorkInfo.State.ENQUEUED } -> androidx.work.WorkInfo.State.ENQUEUED
-                    allInfos.any { it.state == androidx.work.WorkInfo.State.FAILED } -> androidx.work.WorkInfo.State.FAILED
+
+                val workerState = when {
+                    allInfos.any { it.state == WorkInfo.State.RUNNING } -> WorkInfo.State.RUNNING
+                    allInfos.any { it.state == WorkInfo.State.ENQUEUED } -> WorkInfo.State.ENQUEUED
+                    allInfos.any { it.state == WorkInfo.State.FAILED } -> WorkInfo.State.FAILED
                     else -> null
                 }
-            }.collect { combinedState ->
-                _uiState.update { it.copy(backgroundWorkerState = combinedState) }
+
+                // Get next scheduled run time from periodic worker
+                val nextRunTime = periodic
+                    .filter { it.state == WorkInfo.State.ENQUEUED }
+                    .mapNotNull { it.nextScheduleTimeMillis }
+                    .filter { it > 0 }
+                    .minOrNull()
+
+                Pair(workerState, nextRunTime)
+            }.collect { (combinedState, nextRunTime) ->
+                _uiState.update {
+                    it.copy(
+                        backgroundWorkerState = combinedState,
+                        nextScheduleTimeMillis = nextRunTime
+                    )
+                }
             }
         }
     }
@@ -148,13 +170,29 @@ class DashboardViewModel(
                 return@launch
             }
 
-            _uiState.update { it.copy(isLoading = true, error = null, aiModelState = AiModelState.READY) }
+            _uiState.update {
+                it.copy(
+                    isLoading = true,
+                    error = null,
+                    aiModelState = AiModelState.READY,
+                    parsingProcessed = 0,
+                    parsingTotal = 0
+                )
+            }
             try {
-                parseSmsUseCase(limit = 5)
-                _uiState.update { it.copy(isLoading = false) }
+                parseSmsUseCase(limit = 10) { processed, total ->
+                    _uiState.update {
+                        it.copy(parsingProcessed = processed, parsingTotal = total)
+                    }
+                }
+                _uiState.update {
+                    it.copy(isLoading = false, parsingProcessed = 0, parsingTotal = 0)
+                }
             } catch (e: Exception) {
                 Timber.e(e, "Error loading data")
-                _uiState.update { it.copy(isLoading = false, error = e.message) }
+                _uiState.update {
+                    it.copy(isLoading = false, error = e.message, parsingProcessed = 0, parsingTotal = 0)
+                }
             }
         }
     }

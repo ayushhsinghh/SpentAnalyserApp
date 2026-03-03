@@ -15,7 +15,7 @@ class SmsInboxDataSourceImpl(
 
     companion object {
         val KNOWN_BANK_SENDERS = listOf("AXISBK", "HDFCBK", "ICICIB", "SBINB", "SBI", "PNB")
-        val TRANSACTION_KEYWORDS = listOf("debited", "debit", "credited", "credit", "spent", "available bal")
+        val TRANSACTION_KEYWORDS = listOf("debited", "credited", "spent", "debit")
 
         fun generateHash(sender: String, body: String, timestamp: Long): String {
             val input = "$sender|$body|$timestamp"

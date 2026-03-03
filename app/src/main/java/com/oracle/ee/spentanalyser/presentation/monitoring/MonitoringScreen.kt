@@ -55,6 +55,11 @@ fun MonitoringScreen(viewModel: MonitoringViewModel, modifier: Modifier = Modifi
                 EngineInfoCard(status)
             }
 
+            // ── Thermal Health ──
+            item {
+                ThermalHealthCard(status)
+            }
+
             // ── Inference Stats ──
             item {
                 InferenceStatsCard(status)
@@ -124,10 +129,6 @@ fun CurrentTaskCard(status: SystemStatus, modifier: Modifier = Modifier) {
 
 @Composable
 fun MemoryCard(status: SystemStatus, modifier: Modifier = Modifier) {
-    val usagePercent = if (status.maxMemoryMb > 0)
-        (status.memoryUsageMb.toFloat() / status.maxMemoryMb.toFloat()).coerceIn(0f, 1f)
-    else 0f
-
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -149,7 +150,7 @@ fun MemoryCard(status: SystemStatus, modifier: Modifier = Modifier) {
                     modifier = Modifier.size(20.dp)
                 )
                 Text(
-                    text = "Memory Usage",
+                    text = "Total App Memory (PSS)",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -164,30 +165,89 @@ fun MemoryCard(status: SystemStatus, modifier: Modifier = Modifier) {
                     text = "${status.memoryUsageMb} MB",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    color = if (status.memoryUsageMb > 800) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "of ${status.maxMemoryMb} MB",
+                    text = "Includes Native & GPU",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+    }
+}
 
-            val progressColor = when {
-                usagePercent > 0.85f -> MaterialTheme.colorScheme.error
-                usagePercent > 0.65f -> MaterialTheme.colorScheme.tertiary
-                else -> MaterialTheme.colorScheme.primary
+@Composable
+fun ThermalHealthCard(status: SystemStatus, modifier: Modifier = Modifier) {
+    // Basic heuristics: very high nanos headroom means device is relaxed. Low/zero means strained/throttling.
+    // If not supported (< Android 12) it stays 0.
+    val isSupported = status.thermalHeadroomNanos > 0
+    
+    val healthColor = if (!isSupported) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else if (status.thermalHeadroomNanos > 16_000_000) {
+        // High headroom (>16ms)
+        MaterialTheme.colorScheme.primary
+    } else {
+        // Low headroom
+        MaterialTheme.colorScheme.error
+    }
+
+    val healthText = if (!isSupported) {
+        "N/A (Update Android)"
+    } else if (status.thermalHeadroomNanos > 16_000_000) {
+        "Healthy / No Throttling"
+    } else {
+        "High Thermal Load"
+    }
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.DeviceThermostat,
+                    contentDescription = "Thermal Headroom",
+                    tint = healthColor,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = "Device Thermal Status",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
 
-            LinearProgressIndicator(
-                progress = { usagePercent },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp)
-                    .semantics { contentDescription = "Memory usage: ${(usagePercent * 100).toInt()}%" },
-                color = progressColor,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Text(
+                    text = healthText,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = healthColor
+                )
+                if (isSupported) {
+                    Text(
+                        text = "${status.thermalHeadroomNanos / 1000}µs headroom",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }

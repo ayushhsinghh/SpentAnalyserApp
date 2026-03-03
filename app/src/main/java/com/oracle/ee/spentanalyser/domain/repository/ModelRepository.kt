@@ -27,4 +27,7 @@ interface ModelRepository {
 
     /** Get the absolute file path for a downloaded model, or null. */
     fun getModelFilePath(model: LlmModel): String?
+
+    /** Automatically initialize the provided engine with the saved active model and GPU settings (if any exist). */
+    suspend fun autoInitializeEngine(engine: com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine)
 }

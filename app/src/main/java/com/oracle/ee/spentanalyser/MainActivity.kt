@@ -8,9 +8,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -77,6 +79,7 @@ class MainActivity : ComponentActivity() {
                     override fun <T : ViewModel> create(modelClass: Class<T>): T {
                         return DashboardViewModel(
                             transactionRepository = appContainer.transactionRepository,
+                            modelRepository = appContainer.modelRepository,
                             llmEngine = appContainer.llmEngine,
                             parseSmsUseCase = appContainer.parseSmsUseCase,
                             workManager = appContainer.workManager
@@ -88,7 +91,8 @@ class MainActivity : ComponentActivity() {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T {
                         return TransactionsViewModel(
-                            transactionRepository = appContainer.transactionRepository
+                            transactionRepository = appContainer.transactionRepository,
+                            smsLogRepository = appContainer.smsLogRepository
                         ) as T
                     }
                 }
@@ -108,7 +112,8 @@ class MainActivity : ComponentActivity() {
                     override fun <T : ViewModel> create(modelClass: Class<T>): T {
                         return ModelsViewModel(
                             modelRepository = appContainer.modelRepository,
-                            llmEngine = appContainer.llmEngine
+                            llmEngine = appContainer.llmEngine,
+                            workManager = appContainer.workManager
                         ) as T
                     }
                 }
@@ -133,7 +138,8 @@ class MainActivity : ComponentActivity() {
                     transactionsViewModel = transactionsViewModel,
                     logsViewModel = logsViewModel,
                     modelsViewModel = modelsViewModel,
-                    monitoringViewModel = monitoringViewModel
+                    monitoringViewModel = monitoringViewModel,
+                    preferencesManager = appContainer.preferencesManager
                 )
             }
         }
@@ -147,7 +153,8 @@ fun SpentAnalyserApp(
     transactionsViewModel: TransactionsViewModel,
     logsViewModel: LogsViewModel,
     modelsViewModel: ModelsViewModel,
-    monitoringViewModel: MonitoringViewModel
+    monitoringViewModel: MonitoringViewModel,
+    preferencesManager: com.oracle.ee.spentanalyser.data.database.PreferencesManager
 ) {
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -201,8 +208,40 @@ fun SpentAnalyserApp(
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
+                
+                Spacer(modifier = Modifier.weight(1f))
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                
+                // Auto-parsing toggle setting
+                val isAutoParsingEnabled by preferencesManager.isAutoParsingEnabledFlow.collectAsState(initial = true)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Background Auto-Parsing",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (isAutoParsingEnabled) "ON - Processing new SMS" else "OFF - Not processing",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = isAutoParsingEnabled,
+                        onCheckedChange = { isEnabled ->
+                            scope.launch { preferencesManager.setAutoParsingEnabled(isEnabled) }
+                        }
+                    )
+                }
             }
-        }
+        },
     ) {
         // Determine if we're on a bottom-nav destination
         val isBottomNavRoute = bottomNavItems.any { screen ->
@@ -212,15 +251,60 @@ fun SpentAnalyserApp(
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = {},
+                    title = {
+                        val title = if (isBottomNavRoute) {
+                            bottomNavItems.find { screen ->
+                                currentDestination?.hierarchy?.any { it.route == screen.route } == true
+                            }?.title ?: ""
+                        } else {
+                            drawerItems.find { screen ->
+                                currentDestination?.hierarchy?.any { it.route == screen.route } == true
+                            }?.title ?: ""
+                        }
+                        Text(text = title, fontWeight = FontWeight.Bold)
+                    },
                     navigationIcon = {
-                        IconButton(
-                            onClick = { scope.launch { drawerState.open() } }
-                        ) {
-                            Icon(
-                                Icons.Default.Menu,
-                                contentDescription = "Open navigation drawer"
-                            )
+                        if (!isBottomNavRoute) {
+                            // Back arrow on drawer screens → go home
+                            IconButton(
+                                onClick = {
+                                    navController.navigate(Screen.Dashboard.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to Dashboard"
+                                )
+                            }
+                        } else {
+                            // Hamburger on bottom-nav screens
+                            IconButton(
+                                onClick = { scope.launch { drawerState.open() } }
+                            ) {
+                                Icon(
+                                    Icons.Default.Menu,
+                                    contentDescription = "Open navigation drawer"
+                                )
+                            }
+                        }
+                    },
+                    actions = {
+                        if (!isBottomNavRoute) {
+                            // Also allow drawer access from drawer screens
+                            IconButton(
+                                onClick = { scope.launch { drawerState.open() } }
+                            ) {
+                                Icon(
+                                    Icons.Default.Menu,
+                                    contentDescription = "Open navigation drawer"
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(

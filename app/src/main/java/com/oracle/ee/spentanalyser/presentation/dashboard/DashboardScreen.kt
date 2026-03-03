@@ -51,40 +51,7 @@ fun DashboardScreen(
     val selectedYear by viewModel.selectedYear.collectAsState()
     val filterPeriod by viewModel.filterPeriod.collectAsState()
 
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
-
-    Scaffold(
-        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-        topBar = {
-            LargeTopAppBar(
-                title = {
-                    Text(
-                        text = "Dashboard",
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                scrollBehavior = scrollBehavior,
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface
-                )
-            )
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { viewModel.loadData() },
-                icon = {
-                    Icon(
-                        Icons.Default.Sync,
-                        contentDescription = "Analyze new SMS messages"
-                    )
-                },
-                text = { Text("Analyze SMS") },
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        }
-    ) { innerPadding ->
+    Box(modifier = modifier) {
         DashboardContent(
             uiState = uiState,
             transactions = transactions,
@@ -94,7 +61,23 @@ fun DashboardScreen(
             onMonthChanged = { viewModel.updateSelectedMonth(it) },
             onYearChanged = { viewModel.updateSelectedYear(it) },
             onFilterChanged = { viewModel.updateFilterPeriod(it) },
-            modifier = Modifier.padding(innerPadding)
+            modifier = Modifier.fillMaxSize()
+        )
+
+        ExtendedFloatingActionButton(
+            onClick = { viewModel.loadData() },
+            icon = {
+                Icon(
+                    Icons.Default.Sync,
+                    contentDescription = "Analyze new SMS messages"
+                )
+            },
+            text = { Text("Analyze SMS") },
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp)
         )
     }
 }
@@ -142,27 +125,14 @@ fun DashboardContent(
             )
         }
 
-        // ── AI / Worker Status Banners ──
+        // ── AI Status Banner ──
         item {
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            AnimatedVisibility(
+                visible = uiState.aiModelState != AiModelState.READY || uiState.isLoading,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
             ) {
-                AnimatedVisibility(
-                    visible = uiState.aiModelState != AiModelState.READY || uiState.isLoading,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    AiStatusBanner(uiState)
-                }
-
-                AnimatedVisibility(
-                    visible = uiState.backgroundWorkerState != null,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    WorkerStatusBanner(uiState)
-                }
+                AiStatusBanner(uiState, modifier = Modifier.padding(horizontal = 16.dp))
             }
         }
 
@@ -280,6 +250,20 @@ fun DashboardContent(
                 )
             }
         }
+
+        // ── Worker Status (moved to bottom) ──
+        item {
+            AnimatedVisibility(
+                visible = uiState.backgroundWorkerState != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                WorkerStatusBanner(
+                    uiState = uiState,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+        }
     }
 }
 
@@ -353,12 +337,12 @@ fun FilterChipRow(
 
 // ─── AI Status Banner ───
 @Composable
-fun AiStatusBanner(uiState: DashboardUiState) {
+fun AiStatusBanner(uiState: DashboardUiState, modifier: Modifier = Modifier) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
+            .animateContentSize(),
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -403,40 +387,57 @@ fun AiStatusBanner(uiState: DashboardUiState) {
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                         }
-                        statusText = "Parsing SMS via Gemma…"
+                        statusText = if (uiState.parsingTotal > 0) {
+                            "Parsing SMS… ${uiState.parsingProcessed}/${uiState.parsingTotal}"
+                        } else {
+                            "Parsing SMS…"
+                        }
                     }
                 }
 
                 statusIcon()
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = if (uiState.aiModelState == AiModelState.ERROR)
-                        MaterialTheme.colorScheme.error
-                    else
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                Column {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = if (uiState.aiModelState == AiModelState.ERROR)
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
             }
 
             // Progress bar (only when parsing)
             if (uiState.aiModelState == AiModelState.READY && uiState.isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.primaryContainer
-                )
+                if (uiState.parsingTotal > 0) {
+                    LinearProgressIndicator(
+                        progress = { (uiState.parsingProcessed.toFloat() / uiState.parsingTotal).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                }
             }
         }
     }
 }
 
-// ─── Worker Status Banner (no more unsafe casts) ───
+// ─── Worker Status Banner ───
 @Composable
-fun WorkerStatusBanner(uiState: DashboardUiState) {
+fun WorkerStatusBanner(uiState: DashboardUiState, modifier: Modifier = Modifier) {
     val state = uiState.backgroundWorkerState ?: return
 
     val statusText: String
+    val subtitleText: String?
+    val iconVec: androidx.compose.ui.graphics.vector.ImageVector
     val barColor: androidx.compose.ui.graphics.Color
     val containerColor: androidx.compose.ui.graphics.Color
     val showProgress: Boolean
@@ -444,24 +445,35 @@ fun WorkerStatusBanner(uiState: DashboardUiState) {
     when (state) {
         androidx.work.WorkInfo.State.RUNNING -> {
             statusText = "Parsing background SMS…"
+            subtitleText = null
+            iconVec = Icons.Default.Sync
             barColor = MaterialTheme.colorScheme.tertiary
             containerColor = MaterialTheme.colorScheme.tertiaryContainer
             showProgress = true
         }
         androidx.work.WorkInfo.State.ENQUEUED -> {
             statusText = "Background worker scheduled"
+            subtitleText = uiState.nextScheduleTimeMillis?.let { millis ->
+                val sdf = java.text.SimpleDateFormat("hh:mm a, MMM dd", java.util.Locale.getDefault())
+                "Next run at ${sdf.format(java.util.Date(millis))}"
+            }
+            iconVec = Icons.Default.Schedule
             barColor = MaterialTheme.colorScheme.secondary
             containerColor = MaterialTheme.colorScheme.secondaryContainer
             showProgress = false
         }
         androidx.work.WorkInfo.State.FAILED -> {
             statusText = "Background worker failed"
+            subtitleText = "Will retry automatically"
+            iconVec = Icons.Default.ErrorOutline
             barColor = MaterialTheme.colorScheme.error
             containerColor = MaterialTheme.colorScheme.errorContainer
             showProgress = false
         }
         else -> {
             statusText = "Worker idle"
+            subtitleText = null
+            iconVec = Icons.Default.CheckCircleOutline
             barColor = MaterialTheme.colorScheme.outline
             containerColor = MaterialTheme.colorScheme.surfaceVariant
             showProgress = false
@@ -470,7 +482,7 @@ fun WorkerStatusBanner(uiState: DashboardUiState) {
 
     Card(
         colors = CardDefaults.cardColors(containerColor = containerColor),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -483,17 +495,33 @@ fun WorkerStatusBanner(uiState: DashboardUiState) {
             ) {
                 if (showProgress) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp,
                         color = barColor
                     )
+                } else {
+                    Icon(
+                        imageVector = iconVec,
+                        contentDescription = null,
+                        tint = barColor,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Column {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (subtitleText != null) {
+                        Text(
+                            text = subtitleText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
             if (showProgress) {
                 LinearProgressIndicator(

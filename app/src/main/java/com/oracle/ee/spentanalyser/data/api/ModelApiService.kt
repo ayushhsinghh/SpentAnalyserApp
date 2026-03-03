@@ -17,7 +17,7 @@ class ModelApiService {
     companion object {
         private const val BASE_URL = "https://api.ayush.ltd"
         private const val MODELS_ENDPOINT = "$BASE_URL/api/models"
-        const val API_KEY = "AYUSH_BOSS"
+        const val API_KEY = "AYUSH_BOSS" // THE API is RATE_LIMITED to 2 req/hour with this KEY, Dont get Too Exited By the Keys
     }
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }

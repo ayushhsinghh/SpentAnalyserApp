@@ -14,5 +14,9 @@ data class DashboardUiState(
     val isLoading: Boolean = false,
     val aiModelState: AiModelState = AiModelState.CHECKING,
     val error: String? = null,
-    val backgroundWorkerState: WorkInfo.State? = null
+    val backgroundWorkerState: WorkInfo.State? = null,
+    val nextScheduleTimeMillis: Long? = null,
+    // SMS parsing progress
+    val parsingTotal: Int = 0,
+    val parsingProcessed: Int = 0
 )
