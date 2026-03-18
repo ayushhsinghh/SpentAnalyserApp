@@ -2,7 +2,10 @@ package com.oracle.ee.spentanalyser.presentation.models
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.asFlow
+import androidx.work.WorkInfo
 import com.oracle.ee.spentanalyser.data.repository.ModelRepositoryImpl
+import com.oracle.ee.spentanalyser.data.worker.ModelDownloadWorker
 import com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine
 import com.oracle.ee.spentanalyser.domain.model.LlmModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,12 +60,34 @@ class ModelsViewModel(
         viewModelScope.launch {
             _localState.update { it.copy(downloadingModelId = model.id, downloadProgress = 0, error = null) }
             try {
-                modelRepository.downloadModel(model) { progress ->
-                    _localState.update { it.copy(downloadProgress = progress) }
+                modelRepository.enqueueDownloadWork(model)
+                
+                workManager.getWorkInfosForUniqueWorkLiveData("DOWNLOAD_${model.id}").asFlow().collect { workInfos ->
+                    val workInfo = workInfos.firstOrNull() ?: return@collect
+                    
+                    when (workInfo.state) {
+                        WorkInfo.State.ENQUEUED -> {
+                            _localState.update { it.copy(downloadingModelId = model.id, downloadProgress = 0) }
+                        }
+                        WorkInfo.State.RUNNING -> {
+                            val progress = workInfo.progress.getInt(ModelDownloadWorker.KEY_PROGRESS, 0)
+                            _localState.update { it.copy(downloadingModelId = model.id, downloadProgress = progress) }
+                        }
+                        WorkInfo.State.SUCCEEDED -> {
+                            _localState.update { it.copy(downloadingModelId = null, downloadProgress = 100) }
+                            modelRepository.forceRefreshState()
+                            modelRepository.refreshModelCatalog()
+                        }
+                        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
+                            _localState.update {
+                                it.copy(downloadingModelId = null, error = "Download failed or was cancelled.")
+                            }
+                        }
+                        else -> { /* Ignore other states like BLOCKED */ }
+                    }
                 }
-                _localState.update { it.copy(downloadingModelId = null, downloadProgress = 100) }
             } catch (e: Exception) {
-                Timber.e(e, "Failed to download model: %s", model.name)
+                Timber.e(e, "Failed to enqueue model download: %s", model.name)
                 _localState.update {
                     it.copy(downloadingModelId = null, error = "Download failed: ${e.message}")
                 }
@@ -93,10 +118,16 @@ class ModelsViewModel(
 
                 val useGpu = uiState.value.useGpu
                 modelRepository.setActiveModel(model.id)
-                llmEngine.initialize(filePath, useGpu)
+                val actualBackend = llmEngine.initialize(filePath, useGpu)
+                
+                // If we asked for GPU but got forced to CPU fallback, sync the UI state true -> false
+                if (useGpu && actualBackend == LlmInferenceEngine.Backend.CPU) {
+                    modelRepository.setUseGpu(false)
+                    Timber.w("Model Initialization forced fallback to CPU. Synced preference to false.")
+                }
 
                 _localState.update { it.copy(initializingModelId = null) }
-                Timber.d("Model activated: %s (GPU=%s)", model.name, useGpu)
+                Timber.d("Model activated: %s (Backend=%s)", model.name, actualBackend.name)
                 
                 // Immediately trigger background SMS parsing to catch up on unparsed messages
                 val workRequest = androidx.work.OneTimeWorkRequestBuilder<com.oracle.ee.spentanalyser.worker.SmsParsingWorker>()

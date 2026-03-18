@@ -7,7 +7,7 @@ enum class AiModelState {
 }
 
 enum class FilterPeriod {
-    TODAY, LAST_7_DAYS, MONTH
+    TODAY, YESTERDAY, LAST_7_DAYS, MONTH, CUSTOM
 }
 
 data class DashboardUiState(

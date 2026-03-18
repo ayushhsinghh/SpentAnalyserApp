@@ -36,6 +36,7 @@ import java.util.Locale
 @Composable
 fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
     val logs by viewModel.smsLogs.collectAsState()
+    val isRetryingLogHash by viewModel.isRetrying.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("All", "Success", "Failed", "Ignored")
@@ -82,6 +83,7 @@ fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
         modifier = modifier
     ) { paddingValues ->
         var editingLog by remember { mutableStateOf<SmsLog?>(null) }
+        var retryingLog by remember { mutableStateOf<SmsLog?>(null) }
 
         if (filteredLogs.isEmpty()) {
             EmptyStateView(
@@ -112,7 +114,9 @@ fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
                 ) { log ->
                     ExpandableLogCard(
                         log = log,
+                        isRetrying = isRetryingLogHash == log.uniqueHash,
                         onManualEdit = { editingLog = log },
+                        onRetry = { retryingLog = log },
                         modifier = Modifier.animateItem()
                     )
                 }
@@ -123,12 +127,14 @@ fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
         editingLog?.let { log ->
             var initialAmount = ""
             var initialMerchant = ""
+            var initialCategory = "Unknown"
 
             try {
                 if (!log.rawLlmOutput.isNullOrBlank()) {
                     val raw = log.rawLlmOutput.trim()
                     Regex("\"amount\"\\s*:\\s*([0-9.]+)").find(raw)?.groupValues?.get(1)?.let { initialAmount = it }
                     Regex("\"merchant\"\\s*:\\s*\"([^\"]+)\"").find(raw)?.groupValues?.get(1)?.let { initialMerchant = it }
+                    Regex("\"category\"\\s*:\\s*\"([^\"]+)\"").find(raw)?.groupValues?.get(1)?.let { initialCategory = it }
                 }
             } catch (_: Exception) {}
 
@@ -139,12 +145,14 @@ fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
             TransactionEditDialog(
                 initialAmount = initialAmount,
                 initialMerchant = initialMerchant,
+                initialCategory = initialCategory,
                 initialDate = initialDate,
                 onDismiss = { editingLog = null },
-                onSave = { amount, merchant, date, type ->
+                onSave = { amount, merchant, category, date, type ->
                     viewModel.saveManualTransaction(
                         amount = amount,
                         merchant = merchant,
+                        category = category,
                         date = date,
                         type = type,
                         sourceHash = log.uniqueHash
@@ -153,14 +161,73 @@ fun LogsScreen(viewModel: LogsViewModel, modifier: Modifier = Modifier) {
                 }
             )
         }
+
+        retryingLog?.let { log ->
+            RetryPromptDialog(
+                onDismiss = { retryingLog = null },
+                onRetry = { hint ->
+                    viewModel.retryParsing(log, hint)
+                    retryingLog = null
+                    selectedTab = 0 // Move back to all to see status change
+                }
+            )
+        }
     }
+}
+
+@Composable
+fun RetryPromptDialog(
+    onDismiss: () -> Unit,
+    onRetry: (String) -> Unit
+) {
+    var promptHint by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Retry Parsing")
+        },
+        text = {
+            Column {
+                Text(
+                    "You can provide hints to help the AI extract the correct data. Try telling it what you want:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = promptHint,
+                    onValueChange = { promptHint = it },
+                    label = { Text("Custom Prompt / Hint") },
+                    placeholder = { Text("e.g. The amount is 500 and the merchant is Swiggy") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 5
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onRetry(promptHint) }
+            ) {
+                Text("Retry")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 // ─── Expandable Log Card (Progressive Disclosure) ───
 @Composable
 fun ExpandableLogCard(
     log: SmsLog,
+    isRetrying: Boolean = false,
     onManualEdit: () -> Unit = {},
+    onRetry: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
@@ -292,22 +359,52 @@ fun ExpandableLogCard(
                             color = MaterialTheme.colorScheme.error
                         )
 
-                        FilledTonalButton(
-                            onClick = onManualEdit,
-                            modifier = Modifier
-                                .align(Alignment.End)
-                                .height(48.dp), // 48dp touch target
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
                         ) {
-                            Icon(
-                                Icons.Default.Edit,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (status == ParseStatus.MANUAL_REVIEW) "Edit Transaction" else "Manual Entry")
+                            if (status == ParseStatus.ERROR || status == ParseStatus.MANUAL_REVIEW) {
+                                TextButton(
+                                    onClick = onRetry,
+                                    enabled = !isRetrying,
+                                    modifier = Modifier.height(48.dp)
+                                ) {
+                                    if (isRetrying) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Retrying...")
+                                    } else {
+                                        Icon(
+                                            Icons.Default.Refresh,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Retry with Hint")
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+
+                            FilledTonalButton(
+                                onClick = onManualEdit,
+                                modifier = Modifier.height(48.dp), // 48dp touch target
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                                )
+                            ) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (status == ParseStatus.MANUAL_REVIEW) "Edit Transaction" else "Manual Entry")
+                            }
                         }
                     }
 

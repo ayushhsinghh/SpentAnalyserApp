@@ -36,4 +36,7 @@ class SmsLogRepositoryImpl(
             )
         }
     }
+
+    override suspend fun clearAllSmsLogs() =
+        appDao.clearAllSmsLogs()
 }

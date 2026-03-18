@@ -4,6 +4,7 @@ data class Transaction(
     val id: Int = 0,
     val amount: Double,
     val merchant: String,
+    val category: String,
     val date: String,
     val type: String,
     val sourceSmsHash: String,

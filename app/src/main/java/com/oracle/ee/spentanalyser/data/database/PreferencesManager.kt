@@ -19,8 +19,10 @@ class PreferencesManager(private val context: Context) {
         val LAST_PROCESSED_TIMESTAMP = longPreferencesKey("last_processed_timestamp")
         val ACTIVE_MODEL_ID = stringPreferencesKey("active_model_id")
         val ACTIVE_MODEL_FILE_NAME = stringPreferencesKey("active_model_file_name")
+        val ACTIVE_MODEL_NAME = stringPreferencesKey("active_model_name")
         val USE_GPU = booleanPreferencesKey("use_gpu")
         val AUTO_PARSING_ENABLED = booleanPreferencesKey("auto_parsing_enabled")
+        val IS_INITIAL_HISTORY_PROCESSED = booleanPreferencesKey("is_initial_history_processed")
     }
 
     // ── SMS Parsing ──
@@ -45,17 +47,23 @@ class PreferencesManager(private val context: Context) {
         .map { preferences ->
             preferences[ACTIVE_MODEL_FILE_NAME]
         }
+        
+    val activeModelNameFlow: Flow<String?> = context.dataStore.data
+        .map { preferences ->
+            preferences[ACTIVE_MODEL_NAME]
+        }
 
-    suspend fun setActiveModel(modelId: String, fileName: String) {
+    suspend fun setActiveModel(modelId: String, fileName: String, modelName: String) {
         context.dataStore.edit { preferences ->
             preferences[ACTIVE_MODEL_ID] = modelId
             preferences[ACTIVE_MODEL_FILE_NAME] = fileName
+            preferences[ACTIVE_MODEL_NAME] = modelName
         }
     }
 
     val useGpuFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences ->
-            preferences[USE_GPU] ?: true  // Default to GPU
+            preferences[USE_GPU] ?: false  // Default to CPU
         }
 
     suspend fun setUseGpu(useGpu: Boolean) {
@@ -73,6 +81,17 @@ class PreferencesManager(private val context: Context) {
     suspend fun setAutoParsingEnabled(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[AUTO_PARSING_ENABLED] = enabled
+        }
+    }
+
+    val isInitialHistoryProcessedFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[IS_INITIAL_HISTORY_PROCESSED] ?: false
+        }
+
+    suspend fun setInitialHistoryProcessed(processed: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[IS_INITIAL_HISTORY_PROCESSED] = processed
         }
     }
 }

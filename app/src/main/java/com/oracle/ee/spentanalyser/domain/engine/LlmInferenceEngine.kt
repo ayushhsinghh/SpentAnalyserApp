@@ -7,11 +7,17 @@ package com.oracle.ee.spentanalyser.domain.engine
  */
 interface LlmInferenceEngine {
     /**
+     * Represents the actual backend initialized by the engine.
+     */
+    enum class Backend { GPU, CPU }
+
+    /**
      * Initialize the engine with a model file and hardware preference.
      * @param modelPath Absolute path to the model file on disk.
      * @param useGpu Whether to prefer GPU acceleration over CPU.
+     * @return The actual hardware Backend used (may fall back to CPU).
      */
-    suspend fun initialize(modelPath: String, useGpu: Boolean)
+    suspend fun initialize(modelPath: String, useGpu: Boolean): Backend
 
     /**
      * Run inference with the given prompt and return raw text output.

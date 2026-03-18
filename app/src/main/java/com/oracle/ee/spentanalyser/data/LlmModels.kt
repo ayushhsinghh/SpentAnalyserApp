@@ -9,6 +9,7 @@ import kotlinx.serialization.Serializable
 data class TransactionData(
     val amount: Double,
     val merchant: String,
+    val category: String = "Unknown",
     val type: String, // E.g: "DEBIT", "CREDIT"
     val date: String? = null
 )

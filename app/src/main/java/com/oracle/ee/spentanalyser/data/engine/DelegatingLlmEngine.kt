@@ -5,18 +5,18 @@ import com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine
 import timber.log.Timber
 
 /**
- * A wrapper engine that dynamically instantiates either [MediaPipeLlmEngine] for legacy `.task` models
- * or [LiteRtLlmEngine] for modern `.litertlm` models, hiding the complexity from the domain layer.
+ * A wrapper engine that dynamically instantiates either [LiteRtLlmEngine] for modern `.litertlm`
+ * models or [MediaPipeLlmEngine] for legacy `.task` models, hiding the complexity from the domain layer.
  */
 class DelegatingLlmEngine(private val context: Context) : LlmInferenceEngine {
 
     private var activeEngine: LlmInferenceEngine? = null
 
-    override suspend fun initialize(modelPath: String, useGpu: Boolean) {
+    override suspend fun initialize(modelPath: String, useGpu: Boolean): LlmInferenceEngine.Backend {
         release()
 
-        val engine = if (modelPath.endsWith(".litertlm", ignoreCase = true)) {
-            Timber.d("Routing to LiteRTLlmEngine for: %s", modelPath)
+        val engine = if (modelPath.endsWith(".litertlm")) {
+            Timber.d("Routing to LiteRtLlmEngine for: %s", modelPath)
             LiteRtLlmEngine(context)
         } else {
             Timber.d("Routing to MediaPipeLlmEngine for: %s", modelPath)
@@ -24,7 +24,7 @@ class DelegatingLlmEngine(private val context: Context) : LlmInferenceEngine {
         }
 
         activeEngine = engine
-        engine.initialize(modelPath, useGpu)
+        return engine.initialize(modelPath, useGpu)
     }
 
     override suspend fun infer(prompt: String): String {

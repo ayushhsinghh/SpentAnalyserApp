@@ -4,7 +4,7 @@ import com.oracle.ee.spentanalyser.domain.model.LlmModel
 
 data class ModelsUiState(
     val models: List<LlmModel> = emptyList(),
-    val useGpu: Boolean = true,
+    val useGpu: Boolean = false,
     val isLoadingModels: Boolean = false,
     val downloadingModelId: String? = null,
     val downloadProgress: Int = 0,

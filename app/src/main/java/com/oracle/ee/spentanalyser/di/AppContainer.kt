@@ -57,6 +57,6 @@ class AppContainer(private val context: Context) {
 
     // Use Cases
     val parseSmsUseCase by lazy {
-        ParseSmsUseCase(smsInboxDataSource, llmEngine, transactionRepository, smsLogRepository)
+        ParseSmsUseCase(smsInboxDataSource, llmEngine, transactionRepository, smsLogRepository, systemMonitor)
     }
 }

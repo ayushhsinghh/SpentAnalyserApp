@@ -18,9 +18,11 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.Calendar
+import kotlinx.coroutines.flow.first
 
 /**
  * Dashboard ViewModel — focused on financial data and SMS parsing.
@@ -32,8 +34,13 @@ class DashboardViewModel(
     private val modelRepository: ModelRepository,
     private val llmEngine: LlmInferenceEngine,
     private val parseSmsUseCase: ParseSmsUseCase,
-    private val workManager: WorkManager
+    private val workManager: WorkManager,
+    private val preferencesManager: com.oracle.ee.spentanalyser.data.database.PreferencesManager,
+    private val smsLogRepository: com.oracle.ee.spentanalyser.domain.repository.SmsLogRepository
 ) : ViewModel() {
+
+    private var parsingJob: Job? = null
+
 
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
@@ -49,15 +56,21 @@ class DashboardViewModel(
     private val _filterPeriod = MutableStateFlow(FilterPeriod.MONTH)
     val filterPeriod: StateFlow<FilterPeriod> = _filterPeriod.asStateFlow()
 
+    private val _customStartDateMillis = MutableStateFlow<Long?>(null)
+    val customStartDateMillis: StateFlow<Long?> = _customStartDateMillis.asStateFlow()
+
+    private val _customEndDateMillis = MutableStateFlow<Long?>(null)
+    val customEndDateMillis: StateFlow<Long?> = _customEndDateMillis.asStateFlow()
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val transactions: StateFlow<List<Transaction>> = combine(
-        _selectedMonth, _selectedYear, _filterPeriod
-    ) { month, year, period ->
-        Triple(month, year, period)
-    }.flatMapLatest { (month, year, period) ->
+        _selectedMonth, _selectedYear, _filterPeriod, _customStartDateMillis, _customEndDateMillis
+    ) { month, year, period, customStart, customEnd ->
+        DashboardFilterState(month, year, period, customStart, customEnd)
+    }.flatMapLatest { state ->
         val calendar = Calendar.getInstance()
 
-        when (period) {
+        when (state.period) {
             FilterPeriod.TODAY -> {
                 calendar.set(Calendar.HOUR_OF_DAY, 0)
                 calendar.set(Calendar.MINUTE, 0)
@@ -65,13 +78,27 @@ class DashboardViewModel(
                 calendar.set(Calendar.MILLISECOND, 0)
                 transactionRepository.getTransactionsSinceFlow(calendar.timeInMillis)
             }
+            FilterPeriod.YESTERDAY -> {
+                calendar.set(Calendar.HOUR_OF_DAY, 0)
+                calendar.set(Calendar.MINUTE, 0)
+                calendar.set(Calendar.SECOND, 0)
+                calendar.set(Calendar.MILLISECOND, 0)
+                calendar.add(Calendar.DAY_OF_YEAR, -1)
+                val start = calendar.timeInMillis
+                
+                calendar.add(Calendar.DAY_OF_YEAR, 1)
+                calendar.add(Calendar.MILLISECOND, -1)
+                val end = calendar.timeInMillis
+                
+                transactionRepository.getTransactionsBetweenFlow(start, end)
+            }
             FilterPeriod.LAST_7_DAYS -> {
                 calendar.add(Calendar.DAY_OF_YEAR, -7)
                 transactionRepository.getTransactionsSinceFlow(calendar.timeInMillis)
             }
             FilterPeriod.MONTH -> {
-                calendar.set(Calendar.YEAR, year)
-                calendar.set(Calendar.MONTH, month)
+                calendar.set(Calendar.YEAR, state.year)
+                calendar.set(Calendar.MONTH, state.month)
                 calendar.set(Calendar.DAY_OF_MONTH, 1)
                 calendar.set(Calendar.HOUR_OF_DAY, 0)
                 calendar.set(Calendar.MINUTE, 0)
@@ -85,6 +112,11 @@ class DashboardViewModel(
                 val endTimestamp = calendar.timeInMillis
 
                 transactionRepository.getTransactionsBetweenFlow(startTimestamp, endTimestamp)
+            }
+            FilterPeriod.CUSTOM -> {
+                val start = state.customStart ?: 0L
+                val end = state.customEnd ?: Long.MAX_VALUE
+                transactionRepository.getTransactionsBetweenFlow(start, end)
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -102,12 +134,45 @@ class DashboardViewModel(
     fun updateFilterPeriod(period: FilterPeriod) {
         _filterPeriod.value = period
     }
+    
+    fun setCustomDateRange(startMillis: Long?, endMillis: Long?) {
+        _customStartDateMillis.value = startMillis
+        _customEndDateMillis.value = endMillis
+        if (startMillis != null && endMillis != null) {
+            _filterPeriod.value = FilterPeriod.CUSTOM
+        }
+    }
 
     init {
         viewModelScope.launch {
-            _uiState.update { it.copy(aiModelState = AiModelState.CHECKING) }
-            modelRepository.autoInitializeEngine(llmEngine)
-            checkEngineState()
+            modelRepository.getActiveModelFlow().collect { activeModel ->
+                if (activeModel != null && activeModel.isDownloaded) {
+                    if (!llmEngine.isInitialized()) {
+                        modelRepository.autoInitializeEngine(llmEngine)
+                    }
+                    val isReady = llmEngine.isInitialized()
+                    if (isReady) {
+                        _uiState.update { it.copy(aiModelState = AiModelState.READY, error = null) }
+                        if (parsingJob?.isActive != true) {
+                            loadData()
+                        }
+                    } else {
+                        _uiState.update { 
+                            it.copy(
+                                aiModelState = AiModelState.ERROR, 
+                                error = "Failed to initialize AI engine even though a model was activated. Please try re-activating."
+                            ) 
+                        }
+                    }
+                } else {
+                    _uiState.update { 
+                        it.copy(
+                            aiModelState = AiModelState.ERROR,
+                            error = "No model active. Go to Models to download and activate one."
+                        ) 
+                    }
+                }
+            }
         }
         observeWorkManager()
     }
@@ -154,12 +219,17 @@ class DashboardViewModel(
         if (llmEngine.isInitialized()) {
             _uiState.update { it.copy(aiModelState = AiModelState.READY) }
         } else {
-            _uiState.update { it.copy(aiModelState = AiModelState.CHECKING) }
+            _uiState.update { it.copy(
+                aiModelState = AiModelState.ERROR,
+                error = "No model active. Go to Models to download and activate one."
+            ) }
         }
     }
 
     fun loadData() {
-        viewModelScope.launch {
+        if (parsingJob?.isActive == true) return
+
+        parsingJob = viewModelScope.launch {
             if (!llmEngine.isInitialized()) {
                 _uiState.update {
                     it.copy(
@@ -180,11 +250,21 @@ class DashboardViewModel(
                 )
             }
             try {
-                parseSmsUseCase(limit = 10) { processed, total ->
+                // Determine limits by checking historical flag
+                val isInitialDone = preferencesManager.isInitialHistoryProcessedFlow.first()
+                val parseLimit = if (isInitialDone) 10 else Int.MAX_VALUE
+            
+                parseSmsUseCase(limit = parseLimit) { processed, total ->
                     _uiState.update {
                         it.copy(parsingProcessed = processed, parsingTotal = total)
                     }
                 }
+                
+                // If it successfully completes a full historical sweep, tag it as done.
+                if (!isInitialDone) {
+                    preferencesManager.setInitialHistoryProcessed(true)
+                }
+                
                 _uiState.update {
                     it.copy(isLoading = false, parsingProcessed = 0, parsingTotal = 0)
                 }
@@ -196,4 +276,61 @@ class DashboardViewModel(
             }
         }
     }
+
+    fun cancelParsing() {
+        parsingJob?.cancel()
+        parsingJob = null
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                parsingProcessed = 0,
+                parsingTotal = 0,
+                aiModelState = AiModelState.READY
+            )
+        }
+    }
+
+    fun updateExistingTransaction(transaction: Transaction, originalMerchant: String? = null) {
+        viewModelScope.launch {
+            try {
+                if (originalMerchant != null && originalMerchant != transaction.merchant) {
+                    transactionRepository.saveMerchantMapping(
+                        alias = originalMerchant,
+                        normalizedName = transaction.merchant
+                    )
+                }
+                val normalizedTx = transaction.copy(merchant = transactionRepository.getNormalizedMerchantOrDefault(transaction.merchant))
+                transactionRepository.updateTransaction(normalizedTx)
+            } catch (e: Exception) {
+                Timber.e(e, "Error updating transaction")
+            }
+        }
+    }
+
+    fun deleteTransaction(id: Int) {
+        viewModelScope.launch {
+            try {
+                transactionRepository.deleteTransaction(id)
+            } catch (e: Exception) {
+                Timber.e(e, "Error deleting transaction")
+            }
+        }
+    }
+
+    suspend fun getSourceSms(hash: String): com.oracle.ee.spentanalyser.domain.model.SmsLog? {
+        return try {
+            smsLogRepository.getSmsLogByHash(hash)
+        } catch (e: Exception) {
+            Timber.e(e, "Error fetching source SMS for hash: $hash")
+            null
+        }
+    }
 }
+
+data class DashboardFilterState(
+    val month: Int,
+    val year: Int,
+    val period: FilterPeriod,
+    val customStart: Long?,
+    val customEnd: Long?
+)

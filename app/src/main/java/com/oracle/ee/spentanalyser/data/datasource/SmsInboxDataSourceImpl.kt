@@ -53,7 +53,11 @@ class SmsInboxDataSourceImpl(
             }
 
             val selection = "${android.provider.Telephony.Sms.Inbox.DATE} >= ? AND ($senderClauses) AND ($keywordClauses)"
-            val sortOrder = "${android.provider.Telephony.Sms.Inbox.DATE} ASC LIMIT $limit"
+            val sortOrder = if (limit == Int.MAX_VALUE) {
+                "${android.provider.Telephony.Sms.Inbox.DATE} ASC"
+            } else {
+                "${android.provider.Telephony.Sms.Inbox.DATE} ASC LIMIT $limit"
+            }
 
             val cursor = context.contentResolver.query(
                 android.provider.Telephony.Sms.Inbox.CONTENT_URI,
@@ -101,6 +105,72 @@ class SmsInboxDataSourceImpl(
         }
 
         Timber.d("Found %d unprocessed bank-related messages natively", messages.size)
+        return messages
+    }
+
+    override suspend fun readSmsForInbox(
+        days: Int,
+        additionalSenders: List<String>,
+        additionalKeywords: List<String>
+    ): List<SmsMessage> {
+        val messages = mutableListOf<SmsMessage>()
+        val timeLimit = System.currentTimeMillis() - (days * 24L * 60 * 60 * 1000)
+
+        val activeSenders = (KNOWN_BANK_SENDERS + additionalSenders).filter { it.isNotBlank() }.distinct()
+        val activeKeywords = additionalKeywords.filter { it.isNotBlank() }.distinct()
+
+        try {
+            val selectionArgsList = mutableListOf<String>()
+            selectionArgsList.add(timeLimit.toString())
+
+            val senderClauses = if (activeSenders.isNotEmpty()) {
+                activeSenders.joinToString(" OR ") {
+                    selectionArgsList.add("%$it%")
+                    "${android.provider.Telephony.Sms.Inbox.ADDRESS} LIKE ?"
+                }
+            } else "1=1"
+
+            val keywordClauses = if (activeKeywords.isNotEmpty()) {
+                activeKeywords.joinToString(" OR ") {
+                    selectionArgsList.add("%$it%")
+                    "${android.provider.Telephony.Sms.Inbox.BODY} LIKE ?"
+                }
+            } else "1=1"
+
+            val selection = "${android.provider.Telephony.Sms.Inbox.DATE} >= ? AND ($senderClauses) AND ($keywordClauses)"
+            val sortOrder = "${android.provider.Telephony.Sms.Inbox.DATE} DESC"
+
+            val cursor = context.contentResolver.query(
+                android.provider.Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(
+                    android.provider.Telephony.Sms._ID,
+                    android.provider.Telephony.Sms.Inbox.ADDRESS,
+                    android.provider.Telephony.Sms.Inbox.BODY,
+                    android.provider.Telephony.Sms.Inbox.DATE
+                ),
+                selection,
+                selectionArgsList.toTypedArray(),
+                sortOrder
+            )
+
+            cursor?.use {
+                val addressColumn = it.getColumnIndexOrThrow(android.provider.Telephony.Sms.Inbox.ADDRESS)
+                val bodyColumn = it.getColumnIndexOrThrow(android.provider.Telephony.Sms.Inbox.BODY)
+                val dateColumn = it.getColumnIndexOrThrow(android.provider.Telephony.Sms.Inbox.DATE)
+
+                while (it.moveToNext()) {
+                    val sender = it.getString(addressColumn) ?: ""
+                    val body = it.getString(bodyColumn) ?: ""
+                    val date = it.getLong(dateColumn)
+
+                    val hash = generateHash(sender, body, date)
+                    messages.add(SmsMessage(hash, sender, body, date))
+                }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error reading SMS for Inbox via ContentResolver")
+        }
+
         return messages
     }
 }

@@ -27,18 +27,27 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.oracle.ee.spentanalyser.domain.model.Transaction
+import com.oracle.ee.spentanalyser.domain.model.TransactionFilterQuery
 import com.oracle.ee.spentanalyser.presentation.common.EmptyStateView
-import com.oracle.ee.spentanalyser.presentation.common.TransactionEditDialog
+import com.oracle.ee.spentanalyser.presentation.common.FilterBottomSheet
+import com.oracle.ee.spentanalyser.presentation.common.TransactionDetailsDialogGroup
 import com.oracle.ee.spentanalyser.ui.theme.SpentAnalyserThemeExtensions
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import com.oracle.ee.spentanalyser.presentation.analytics.EntityType
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Modifier) {
+fun TransactionsScreen(
+    viewModel: TransactionsViewModel, 
+    onNavigateToDrillDown: (EntityType, String) -> Unit = { _, _ -> },
+    modifier: Modifier = Modifier
+) {
     val transactions by viewModel.transactions.collectAsState()
+    var isFilterSheetOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -57,17 +66,22 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
-                )
+                ),
+                actions = {
+                    IconButton(onClick = { isFilterSheetOpen = true }) {
+                        Icon(imageVector = Icons.Default.FilterList, contentDescription = "Filter")
+                    }
+                }
             )
         },
         modifier = modifier
     ) { paddingValues ->
         val scope = rememberCoroutineScope()
+        val filterQuery by viewModel.filterQuery.collectAsState()
+        var isSearchActive by remember { mutableStateOf(false) }
         var selectedTransaction by remember { mutableStateOf<Transaction?>(null) }
         var selectedTransactionSms by remember { mutableStateOf<String?>(null) }
         var isFetchingSms by remember { mutableStateOf(false) }
-        var editingTransaction by remember { mutableStateOf<Transaction?>(null) }
-        var deletingTransaction by remember { mutableStateOf<Transaction?>(null) }
 
         if (transactions.isEmpty()) {
             EmptyStateView(
@@ -77,154 +91,93 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
                 modifier = Modifier.padding(paddingValues)
             )
         } else {
-            LazyColumn(
-                contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp,
-                    top = 8.dp, bottom = 16.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-            ) {
-                items(
-                    transactions,
-                    key = { it.id }
-                ) { transaction ->
-                    TransactionCard(
-                        transaction = transaction,
-                        onClick = {
-                            selectedTransaction = transaction
-                            isFetchingSms = true
-                            scope.launch {
-                                val sms = viewModel.getSourceSms(transaction.sourceSmsHash)
-                                selectedTransactionSms = sms?.body
-                                isFetchingSms = false
+            Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+                // Search Bar
+                DockedSearchBar(
+                    query = filterQuery.searchQuery ?: "",
+                    onQueryChange = { 
+                        viewModel.updateFilterQuery(filterQuery.copy(searchQuery = it)) 
+                    },
+                    onSearch = { isSearchActive = false },
+                    active = isSearchActive,
+                    onActiveChange = { isSearchActive = it },
+                    placeholder = { Text("Search merchants, categories...") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = { 
+                        if (!filterQuery.searchQuery.isNullOrBlank()) {
+                            IconButton(onClick = { 
+                                viewModel.updateFilterQuery(filterQuery.copy(searchQuery = null)) 
+                            }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear")
                             }
-                        },
-                        modifier = Modifier.animateItem()
-                    )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    // Search dropdown content if needed
+                }
+
+                LazyColumn(
+                    contentPadding = PaddingValues(
+                        start = 16.dp, end = 16.dp,
+                        top = 8.dp, bottom = 120.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(
+                        transactions,
+                        key = { it.id }
+                    ) { transaction ->
+                        TransactionCard(
+                            transaction = transaction,
+                            onClick = {
+                                selectedTransaction = transaction
+                                isFetchingSms = true
+                                scope.launch {
+                                    val sms = viewModel.getSourceSms(transaction.sourceSmsHash)
+                                    selectedTransactionSms = sms?.body
+                                    isFetchingSms = false
+                                }
+                            },
+                            onMerchantClick = { name -> onNavigateToDrillDown(EntityType.MERCHANT, name) },
+                            onCategoryClick = { name -> onNavigateToDrillDown(EntityType.CATEGORY, name) },
+                            modifier = Modifier.animateItem()
+                        )
+                    }
                 }
             }
         }
 
         // Unified SMS Details & Actions Dialog
-
-        selectedTransaction?.let { tx ->
-            if (isFetchingSms) {
-                AlertDialog(
-                    onDismissRequest = {},
-                    title = { Text("Loading Details") },
-                    text = { CircularProgressIndicator() },
-                    confirmButton = {}
-                )
-            } else {
-                AlertDialog(
-                    onDismissRequest = {
-                        selectedTransaction = null
-                        selectedTransactionSms = null
-                    },
-                    icon = { Icon(Icons.AutoMirrored.Filled.ReceiptLong, contentDescription = null) },
-                    title = { Text("Transaction Details") },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                            Text(
-                                text = "Source SMS",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = selectedTransactionSms ?: "SMS body not found.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.padding(12.dp)
-                                )
-                            }
-                            
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = "Parsed Data",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                Text("Merchant: \n${tx.merchant}", style = MaterialTheme.typography.bodySmall)
-                                Text("Amount: \n₹${"%.2f".format(tx.amount)}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        Button(onClick = {
-                            editingTransaction = tx
-                            selectedTransaction = null
-                            selectedTransactionSms = null
-                        }) {
-                            Text("Edit")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = { deletingTransaction = tx },
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Text("Delete")
-                        }
-                    }
-                )
+        TransactionDetailsDialogGroup(
+            selectedTransaction = selectedTransaction,
+            selectedTransactionSms = selectedTransactionSms,
+            isFetchingSms = isFetchingSms,
+            onDismissDetails = {
+                selectedTransaction = null
+                selectedTransactionSms = null
+            },
+            onEditTransaction = { updatedTx, originalMerchant ->
+                viewModel.updateExistingTransaction(updatedTx, originalMerchant)
+            },
+            onDeleteTransaction = { id ->
+                viewModel.deleteTransaction(id)
+                selectedTransaction = null
+                selectedTransactionSms = null
             }
-        }
+        )
 
-        // Edit dialog (Triggered from Details Dialog)
-        editingTransaction?.let { tx ->
-            TransactionEditDialog(
-                initialAmount = tx.amount.toString(),
-                initialMerchant = tx.merchant,
-                initialDate = tx.date,
-                initialType = tx.type,
-                onDismiss = { editingTransaction = null },
-                onSave = { newAmount, newMerchant, newDate, newType ->
-                    viewModel.updateExistingTransaction(
-                        tx.copy(amount = newAmount, merchant = newMerchant, date = newDate, type = newType)
-                    )
-                    editingTransaction = null
+        // Filter Bottom Sheet
+        if (isFilterSheetOpen) {
+            FilterBottomSheet(
+                currentQuery = filterQuery,
+                onApply = { newQuery ->
+                    viewModel.updateFilterQuery(newQuery)
                 },
-                onDelete = {
-                    deletingTransaction = tx
-                    editingTransaction = null
-                }
-            )
-        }
-
-        // Delete confirmation
-        deletingTransaction?.let { tx ->
-            AlertDialog(
-                onDismissRequest = { deletingTransaction = null },
-                icon = { Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                title = { Text("Delete Transaction") },
-                text = {
-                    Text("Permanently delete this ₹${"%.2f".format(tx.amount)} transaction with ${tx.merchant}?")
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            viewModel.deleteTransaction(tx.id)
-                            deletingTransaction = null
-                            selectedTransaction = null
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Text("Delete")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { deletingTransaction = null }) {
-                        Text("Cancel")
-                    }
-                }
+                onDismiss = { isFilterSheetOpen = false }
             )
         }
     }
@@ -234,6 +187,8 @@ fun TransactionsScreen(viewModel: TransactionsViewModel, modifier: Modifier = Mo
 fun TransactionCard(
     transaction: Transaction,
     onClick: () -> Unit = {},
+    onMerchantClick: (String) -> Unit = {},
+    onCategoryClick: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val financeColors = SpentAnalyserThemeExtensions.financeColors
@@ -283,15 +238,25 @@ fun TransactionCard(
                     text = transaction.merchant,
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    modifier = Modifier.clickable { onMerchantClick(transaction.merchant) }
                 )
                 Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "${transaction.date} · $formattedTime",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = transaction.category,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { onCategoryClick(transaction.category) }
+                    )
+                    Text(
+                        text = " · ${transaction.date} · $formattedTime",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Column(horizontalAlignment = Alignment.End) {

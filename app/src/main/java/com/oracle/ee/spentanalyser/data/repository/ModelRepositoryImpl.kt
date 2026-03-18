@@ -1,6 +1,11 @@
 package com.oracle.ee.spentanalyser.data.repository
 
 import android.content.Context
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkManager
 import com.oracle.ee.spentanalyser.data.api.ModelApiService
 import com.oracle.ee.spentanalyser.data.database.PreferencesManager
 import com.oracle.ee.spentanalyser.domain.model.LlmModel
@@ -61,64 +66,28 @@ class ModelRepositoryImpl(
         }
     }
 
-    override suspend fun downloadModel(model: LlmModel, onProgress: (Int) -> Unit) = withContext(Dispatchers.IO) {
+    override fun enqueueDownloadWork(model: LlmModel) {
         if (isModelDownloaded(model)) {
-            onProgress(100)
-            return@withContext
+            Timber.d("Model %s is already downloaded.", model.name)
+            return
         }
 
-        Timber.d("Starting model download: %s from %s", model.name, model.downloadUrl)
-        val url = java.net.URL(model.downloadUrl)
-        val connection = url.openConnection() as java.net.HttpURLConnection
-        connection.setRequestProperty("X-Api-Key", ModelApiService.API_KEY)
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 30_000
-        connection.connect()
+        val inputData = Data.Builder()
+            .putString(com.oracle.ee.spentanalyser.data.worker.ModelDownloadWorker.KEY_URL, model.downloadUrl)
+            .putString(com.oracle.ee.spentanalyser.data.worker.ModelDownloadWorker.KEY_FILE_NAME, model.fileName)
+            .build()
 
-        if (connection.responseCode != java.net.HttpURLConnection.HTTP_OK) {
-            throw Exception("Server returned HTTP ${connection.responseCode} ${connection.responseMessage}")
-        }
-
-        val contentLength = connection.contentLengthLong.takeIf { it > 0 } ?: model.sizeBytes
-        val finalFile = File(context.filesDir, model.fileName)
-        val tempFile = File(context.filesDir, "${model.fileName}.tmp")
-
-        try {
-            connection.inputStream.use { input ->
-                tempFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    var totalBytes: Long = 0
-                    var bytesRead: Int
-                    var lastProgress = 0
-
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        totalBytes += bytesRead
-                        if (contentLength > 0) {
-                            val progress = (totalBytes * 100 / contentLength).toInt().coerceAtMost(100)
-                            if (progress != lastProgress) {
-                                onProgress(progress)
-                                lastProgress = progress
-                            }
-                        }
-                        output.write(buffer, 0, bytesRead)
-                    }
-                }
-            }
-
-            if (tempFile.exists() && tempFile.length() > 0) {
-                if (!tempFile.renameTo(finalFile)) {
-                    throw Exception("Failed to rename temporary model file.")
-                }
-                Timber.d("Download complete: %s (%d bytes)", model.name, finalFile.length())
-                _refreshTrigger.update { it + 1 }
-            } else {
-                throw Exception("Downloaded model file is empty or missing.")
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Error downloading model: %s", model.name)
-            if (tempFile.exists()) tempFile.delete()
-            throw e
-        }
+        val workerRequest = OneTimeWorkRequestBuilder<com.oracle.ee.spentanalyser.data.worker.ModelDownloadWorker>()
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .setInputData(inputData)
+            .addTag("MODEL_DOWNLOAD_${model.id}")
+            .build()
+            
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "DOWNLOAD_${model.id}",
+            ExistingWorkPolicy.KEEP,
+            workerRequest
+        )
     }
 
     override suspend fun deleteModel(model: LlmModel) = withContext(Dispatchers.IO) {
@@ -133,7 +102,7 @@ class ModelRepositoryImpl(
     override suspend fun setActiveModel(modelId: String) {
         val model = _cachedModels.value.find { it.id == modelId }
         if (model != null) {
-            preferencesManager.setActiveModel(modelId, model.fileName)
+            preferencesManager.setActiveModel(modelId, model.fileName, model.name)
         } else {
             Timber.w("Model ID %s not found in cache. Cannot set as active and save filename.", modelId)
         }
@@ -149,8 +118,12 @@ class ModelRepositoryImpl(
             val file = File(context.filesDir, fileName)
             if (file.exists() && file.length() > 0) {
                 try {
-                    engine.initialize(file.absolutePath, useGpu)
-                    Timber.d("Auto-initialized engine with model: %s", fileName)
+                    val actualBackend = engine.initialize(file.absolutePath, useGpu)
+                    if (useGpu && actualBackend == com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine.Backend.CPU) {
+                        preferencesManager.setUseGpu(false)
+                        Timber.w("Auto-initialize forced CPU fallback. Synchronizing preference down to false.")
+                    }
+                    Timber.d("Auto-initialized engine with model: %s (Backend: %s)", fileName, actualBackend.name)
                 } catch (e: Exception) {
                     Timber.e(e, "Failed to auto-initialize engine on startup")
                 }
@@ -164,9 +137,34 @@ class ModelRepositoryImpl(
         return combine(
             _cachedModels,
             preferencesManager.activeModelIdFlow,
+            preferencesManager.activeModelNameFlow,
+            preferencesManager.activeModelFileNameFlow,
             _refreshTrigger
-        ) { models, activeId, _ ->
-            models.find { it.id == activeId && isModelDownloaded(it) }
+        ) { models, activeId, activeName, activeFileName, _ ->
+            if (activeId == null) return@combine null
+
+            // Try to find it in the remote catalog first
+            val catalogModel = models.find { it.id == activeId && isModelDownloaded(it) }
+            if (catalogModel != null) {
+                return@combine catalogModel.copy(isDownloaded = true, isActive = true)
+            }
+
+            // If catalog is empty (app just started) but we have the saved preferences, synthesize a local object!
+            if (activeName != null && activeFileName != null) {
+                val synthesizedModel = LlmModel(
+                    id = activeId,
+                    name = activeName,
+                    fileName = activeFileName,
+                    downloadUrl = "",
+                    sizeBytes = 0L,
+                    isDownloaded = true,
+                    isActive = true
+                )
+                if (isModelDownloaded(synthesizedModel)) {
+                    return@combine synthesizedModel
+                }
+            }
+            null
         }
     }
 
@@ -184,5 +182,9 @@ class ModelRepositoryImpl(
     private fun isModelDownloaded(model: LlmModel): Boolean {
         val file = File(context.filesDir, model.fileName)
         return file.exists() && file.length() > 0
+    }
+
+    override fun forceRefreshState() {
+        _refreshTrigger.update { it + 1 }
     }
 }

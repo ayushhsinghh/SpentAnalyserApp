@@ -13,18 +13,25 @@ import androidx.compose.ui.unit.dp
 fun TransactionEditDialog(
     initialAmount: String = "",
     initialMerchant: String = "",
+    initialCategory: String = "Unknown",
     initialDate: String = "",
     initialType: String = "DEBIT",
     onDismiss: () -> Unit,
-    onSave: (amount: Double, merchant: String, date: String, type: String) -> Unit,
+    onSave: (amount: Double, merchant: String, category: String, date: String, type: String) -> Unit,
     onDelete: (() -> Unit)? = null
 ) {
     var amount by remember { mutableStateOf(initialAmount) }
     var merchant by remember { mutableStateOf(initialMerchant) }
+    var category by remember { mutableStateOf(initialCategory) }
     var date by remember { mutableStateOf(initialDate) }
     var type by remember { mutableStateOf(initialType) }
 
     var expandedTypeDropdown by remember { mutableStateOf(false) }
+    var expandedCategoryDropdown by remember { mutableStateOf(false) }
+
+    val validCategories = remember {
+        listOf("Food", "Grocery", "Shopping", "Travel", "Fuel", "Investment", "EMI", "Utilities", "Recharge", "Entertainment", "Insurance", "Subscription", "Health", "Education", "Income", "Credit Card", "Payment", "Unknown")
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -58,6 +65,37 @@ fun TransactionEditDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
+
+                ExposedDropdownMenuBox(
+                    expanded = expandedCategoryDropdown,
+                    onExpandedChange = { expandedCategoryDropdown = it }
+                ) {
+                    OutlinedTextField(
+                        value = category,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Category") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(),
+                        colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expandedCategoryDropdown,
+                        onDismissRequest = { expandedCategoryDropdown = false },
+                        modifier = Modifier.heightIn(max = 240.dp) // Limits dropdown height visually
+                    ) {
+                        validCategories.forEach { selCat ->
+                            DropdownMenuItem(
+                                text = { Text(selCat) },
+                                onClick = {
+                                    category = selCat
+                                    expandedCategoryDropdown = false
+                                }
+                            )
+                        }
+                    }
+                }
 
                 ExposedDropdownMenuBox(
                     expanded = expandedTypeDropdown,
@@ -95,7 +133,7 @@ fun TransactionEditDialog(
                 onClick = {
                     val parsedAmount = amount.toDoubleOrNull()
                     if (parsedAmount != null && merchant.isNotBlank() && date.isNotBlank()) {
-                        onSave(parsedAmount, merchant.trim(), date.trim(), type)
+                        onSave(parsedAmount, merchant.trim(), category, date.trim(), type)
                     }
                 },
                 enabled = amount.isNotBlank() && merchant.isNotBlank() && date.isNotBlank()

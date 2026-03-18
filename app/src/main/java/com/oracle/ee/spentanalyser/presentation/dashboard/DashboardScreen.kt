@@ -8,6 +8,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.TrendingDown
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -26,11 +28,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.oracle.ee.spentanalyser.domain.model.MonthlySpendItem
 import com.oracle.ee.spentanalyser.domain.model.Transaction
 import com.oracle.ee.spentanalyser.presentation.common.EmptyStateView
 import com.oracle.ee.spentanalyser.presentation.common.ShimmerChart
 import com.oracle.ee.spentanalyser.presentation.common.ShimmerStatsRow
 import com.oracle.ee.spentanalyser.presentation.common.ShimmerTransactionList
+import com.oracle.ee.spentanalyser.presentation.common.TransactionDetailsDialogGroup
 import com.oracle.ee.spentanalyser.ui.theme.SpentAnalyserThemeExtensions
 import com.patrykandpatrick.vico.compose.axis.horizontal.rememberBottomAxis
 import com.patrykandpatrick.vico.compose.axis.vertical.rememberStartAxis
@@ -39,10 +43,13 @@ import com.patrykandpatrick.vico.compose.chart.line.lineChart
 import com.patrykandpatrick.vico.core.entry.ChartEntryModelProducer
 import com.patrykandpatrick.vico.core.entry.FloatEntry
 
+import com.oracle.ee.spentanalyser.presentation.analytics.EntityType
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     viewModel: DashboardViewModel,
+    onNavigateToDrillDown: (EntityType, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -50,6 +57,12 @@ fun DashboardScreen(
     val selectedMonth by viewModel.selectedMonth.collectAsState()
     val selectedYear by viewModel.selectedYear.collectAsState()
     val filterPeriod by viewModel.filterPeriod.collectAsState()
+    val customStartDateMillis by viewModel.customStartDateMillis.collectAsState()
+    val customEndDateMillis by viewModel.customEndDateMillis.collectAsState()
+    var selectedTransaction by remember { mutableStateOf<Transaction?>(null) }
+    var selectedTransactionSms by remember { mutableStateOf<String?>(null) }
+    var isFetchingSms by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Box(modifier = modifier) {
         DashboardContent(
@@ -58,9 +71,23 @@ fun DashboardScreen(
             selectedMonth = selectedMonth,
             selectedYear = selectedYear,
             filterPeriod = filterPeriod,
+            customStartDateMillis = customStartDateMillis,
+            customEndDateMillis = customEndDateMillis,
             onMonthChanged = { viewModel.updateSelectedMonth(it) },
             onYearChanged = { viewModel.updateSelectedYear(it) },
             onFilterChanged = { viewModel.updateFilterPeriod(it) },
+            onCustomRangeSet = { start, end -> viewModel.setCustomDateRange(start, end) },
+            onCancelParsing = { viewModel.cancelParsing() },
+            onNavigateToDrillDown = onNavigateToDrillDown,
+            onTransactionClick = { tx ->
+                selectedTransaction = tx
+                isFetchingSms = true
+                scope.launch {
+                    val sms = viewModel.getSourceSms(tx.sourceSmsHash)
+                    selectedTransactionSms = sms?.body
+                    isFetchingSms = false
+                }
+            },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -79,6 +106,24 @@ fun DashboardScreen(
                 .align(Alignment.BottomEnd)
                 .padding(16.dp)
         )
+
+        TransactionDetailsDialogGroup(
+            selectedTransaction = selectedTransaction,
+            selectedTransactionSms = selectedTransactionSms,
+            isFetchingSms = isFetchingSms,
+            onDismissDetails = {
+                selectedTransaction = null
+                selectedTransactionSms = null
+            },
+            onEditTransaction = { updatedTx, originalMerchant ->
+                viewModel.updateExistingTransaction(updatedTx, originalMerchant)
+            },
+            onDeleteTransaction = { id ->
+                viewModel.deleteTransaction(id)
+                selectedTransaction = null
+                selectedTransactionSms = null
+            }
+        )
     }
 }
 
@@ -89,12 +134,19 @@ fun DashboardContent(
     selectedMonth: Int,
     selectedYear: Int,
     filterPeriod: FilterPeriod,
+    customStartDateMillis: Long?,
+    customEndDateMillis: Long?,
     onMonthChanged: (Int) -> Unit,
     onYearChanged: (Int) -> Unit,
     onFilterChanged: (FilterPeriod) -> Unit,
+    onCustomRangeSet: (Long?, Long?) -> Unit,
+    onCancelParsing: () -> Unit,
+    onNavigateToDrillDown: (EntityType, String) -> Unit,
+    onTransactionClick: (Transaction) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val financeColors = SpentAnalyserThemeExtensions.financeColors
+    var isChartExpanded by remember { mutableStateOf(false) }
     val modelProducer = remember { ChartEntryModelProducer() }
     val isLoading = uiState.isLoading && transactions.isEmpty()
 
@@ -118,9 +170,12 @@ fun DashboardContent(
                 selectedMonth = selectedMonth,
                 selectedYear = selectedYear,
                 filterPeriod = filterPeriod,
+                customStartDateMillis = customStartDateMillis,
+                customEndDateMillis = customEndDateMillis,
                 onMonthChanged = onMonthChanged,
                 onYearChanged = onYearChanged,
                 onFilterChanged = onFilterChanged,
+                onCustomRangeSet = onCustomRangeSet,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
@@ -132,7 +187,11 @@ fun DashboardContent(
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut()
             ) {
-                AiStatusBanner(uiState, modifier = Modifier.padding(horizontal = 16.dp))
+                AiStatusBanner(
+                    uiState = uiState,
+                    onCancelParsing = onCancelParsing,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
             }
         }
 
@@ -161,34 +220,53 @@ fun DashboardContent(
         // ── Spending Trend Chart ──
         item {
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    text = "Spending Trend",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-                if (isLoading) {
-                    ShimmerChart()
-                } else if (transactions.isNotEmpty()) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(220.dp)
-                            .semantics { contentDescription = "Spending trend chart showing ${transactions.size} transactions" },
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Chart(
-                            chart = lineChart(),
-                            chartModelProducer = modelProducer,
-                            startAxis = rememberStartAxis(),
-                            bottomAxis = rememberBottomAxis(),
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp)
-                        )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { isChartExpanded = !isChartExpanded }
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Spending Trend",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Icon(
+                        imageVector = if (isChartExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (isChartExpanded) "Collapse Chart" else "Expand Chart",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                AnimatedVisibility(visible = isChartExpanded) {
+                    Column {
+                        if (isLoading) {
+                            ShimmerChart()
+                        } else if (transactions.isNotEmpty()) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(220.dp)
+                                    .semantics { contentDescription = "Spending trend chart showing ${transactions.size} transactions" },
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Chart(
+                                    chart = lineChart(),
+                                    chartModelProducer = modelProducer,
+                                    startAxis = rememberStartAxis(),
+                                    bottomAxis = rememberBottomAxis(),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(16.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
             }
@@ -207,7 +285,15 @@ fun DashboardContent(
             item {
                 TopDestinationsRow(
                     transactions = transactions,
+                    onNavigateToDrillDown = onNavigateToDrillDown,
                     modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+            item {
+                TopCategoriesRow(
+                    transactions = transactions,
+                    onNavigateToDrillDown = onNavigateToDrillDown,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
         }
@@ -244,6 +330,9 @@ fun DashboardContent(
             ) { tx ->
                 RecentTransactionItem(
                     transaction = tx,
+                    onMerchantClick = { name -> onNavigateToDrillDown(EntityType.MERCHANT, name) },
+                    onCategoryClick = { name -> onNavigateToDrillDown(EntityType.CATEGORY, name) },
+                    onClick = { onTransactionClick(tx) },
                     modifier = Modifier
                         .padding(horizontal = 16.dp)
                         .animateItem()
@@ -268,14 +357,18 @@ fun DashboardContent(
 }
 
 // ─── Filter Chips ───
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FilterChipRow(
     selectedMonth: Int,
     selectedYear: Int,
     filterPeriod: FilterPeriod,
+    customStartDateMillis: Long?,
+    customEndDateMillis: Long?,
     onMonthChanged: (Int) -> Unit,
     onYearChanged: (Int) -> Unit,
     onFilterChanged: (FilterPeriod) -> Unit,
+    onCustomRangeSet: (Long?, Long?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val months = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -284,13 +377,47 @@ fun FilterChipRow(
 
     val chips = buildList {
         add(ChipItem("Today", FilterPeriod.TODAY, null, null))
+        add(ChipItem("Yesterday", FilterPeriod.YESTERDAY, null, null))
         add(ChipItem("7 Days", FilterPeriod.LAST_7_DAYS, null, null))
         val cal = java.util.Calendar.getInstance()
-        for (i in 0..5) {
-            val m = cal.get(java.util.Calendar.MONTH)
-            val y = cal.get(java.util.Calendar.YEAR)
-            add(ChipItem("${months[m]} $y", FilterPeriod.MONTH, m, y))
-            cal.add(java.util.Calendar.MONTH, -1)
+        val currentMonth = cal.get(java.util.Calendar.MONTH)
+        val currentYear = cal.get(java.util.Calendar.YEAR)
+        add(ChipItem("This Month", FilterPeriod.MONTH, currentMonth, currentYear))
+        add(ChipItem("Custom Range", FilterPeriod.CUSTOM, null, null))
+    }
+
+    var showDatePicker by remember { mutableStateOf(false) }
+    val dateRangePickerState = rememberDateRangePickerState(
+        initialSelectedStartDateMillis = customStartDateMillis,
+        initialSelectedEndDateMillis = customEndDateMillis
+    )
+
+    if (showDatePicker) {
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDatePicker = false
+                    val start = dateRangePickerState.selectedStartDateMillis
+                    val end = dateRangePickerState.selectedEndDateMillis
+                    if (start != null && end != null) {
+                        onCustomRangeSet(start, end)
+                        onFilterChanged(FilterPeriod.CUSTOM)
+                    }
+                }) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) {
+                    Text("Cancel")
+                }
+            }
+        ) {
+            DateRangePicker(
+                state = dateRangePickerState,
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
         }
     }
 
@@ -302,30 +429,55 @@ fun FilterChipRow(
         items(chips) { chip ->
             val isSelected = when (chip.period) {
                 FilterPeriod.TODAY -> filterPeriod == FilterPeriod.TODAY
+                FilterPeriod.YESTERDAY -> filterPeriod == FilterPeriod.YESTERDAY
                 FilterPeriod.LAST_7_DAYS -> filterPeriod == FilterPeriod.LAST_7_DAYS
                 FilterPeriod.MONTH -> filterPeriod == FilterPeriod.MONTH
                         && chip.month == selectedMonth
                         && chip.year == selectedYear
+                FilterPeriod.CUSTOM -> filterPeriod == FilterPeriod.CUSTOM
             }
 
             FilterChip(
                 selected = isSelected,
                 onClick = {
                     when (chip.period) {
-                        FilterPeriod.TODAY, FilterPeriod.LAST_7_DAYS -> onFilterChanged(chip.period)
+                        FilterPeriod.TODAY, FilterPeriod.YESTERDAY, FilterPeriod.LAST_7_DAYS -> {
+                            onFilterChanged(chip.period)
+                        }
                         FilterPeriod.MONTH -> {
                             chip.month?.let(onMonthChanged)
                             chip.year?.let(onYearChanged)
+                            onFilterChanged(FilterPeriod.MONTH)
+                        }
+                        FilterPeriod.CUSTOM -> {
+                            showDatePicker = true
                         }
                     }
                 },
-                label = { Text(chip.label) },
+                label = { 
+                    if (chip.period == FilterPeriod.CUSTOM && isSelected && customStartDateMillis != null && customEndDateMillis != null) {
+                        val sdf = java.text.SimpleDateFormat("MMM dd", java.util.Locale.getDefault())
+                        val startStr = sdf.format(java.util.Date(customStartDateMillis))
+                        val endStr = sdf.format(java.util.Date(customEndDateMillis))
+                        Text("$startStr - $endStr")
+                    } else {
+                        Text(chip.label) 
+                    }
+                },
                 modifier = Modifier.height(48.dp), // 48dp minimum touch target
                 leadingIcon = if (isSelected) {
                     {
                         Icon(
                             Icons.Default.Check,
                             contentDescription = "Selected: ${chip.label}",
+                            modifier = Modifier.size(FilterChipDefaults.IconSize)
+                        )
+                    }
+                } else if (chip.period == FilterPeriod.CUSTOM) {
+                    {
+                        Icon(
+                            Icons.Default.DateRange,
+                            contentDescription = "Custom Date Range",
                             modifier = Modifier.size(FilterChipDefaults.IconSize)
                         )
                     }
@@ -337,7 +489,11 @@ fun FilterChipRow(
 
 // ─── AI Status Banner ───
 @Composable
-fun AiStatusBanner(uiState: DashboardUiState, modifier: Modifier = Modifier) {
+fun AiStatusBanner(
+    uiState: DashboardUiState,
+    onCancelParsing: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         modifier = modifier
@@ -350,62 +506,80 @@ fun AiStatusBanner(uiState: DashboardUiState, modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .padding(16.dp)
                     .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                val statusIcon: @Composable () -> Unit
-                val statusText: String
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    val statusIcon: @Composable () -> Unit
+                    val statusText: String
 
-                when (uiState.aiModelState) {
-                    AiModelState.CHECKING -> {
-                        statusIcon = {
-                            Icon(
-                                Icons.Default.Info,
-                                contentDescription = "No model loaded",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(20.dp)
-                            )
+                    when (uiState.aiModelState) {
+                        AiModelState.CHECKING -> {
+                            statusIcon = {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = "No model loaded",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            statusText = "No model active — go to Models to set one up"
                         }
-                        statusText = "No model active — go to Models to set one up"
+                        AiModelState.ERROR -> {
+                            statusIcon = {
+                                Icon(
+                                    Icons.Default.ErrorOutline,
+                                    contentDescription = "AI engine error",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            statusText = uiState.error ?: "Failed to load AI Engine"
+                        }
+                        AiModelState.READY -> {
+                            statusIcon = {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                            statusText = if (uiState.parsingTotal > 0) {
+                                "Parsing SMS… ${uiState.parsingProcessed}/${uiState.parsingTotal}"
+                            } else {
+                                "Parsing SMS…"
+                            }
+                        }
                     }
-                    AiModelState.ERROR -> {
-                        statusIcon = {
-                            Icon(
-                                Icons.Default.ErrorOutline,
-                                contentDescription = "AI engine error",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        statusText = uiState.error ?: "Failed to load AI Engine"
-                    }
-                    AiModelState.READY -> {
-                        statusIcon = {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-                        statusText = if (uiState.parsingTotal > 0) {
-                            "Parsing SMS… ${uiState.parsingProcessed}/${uiState.parsingTotal}"
-                        } else {
-                            "Parsing SMS…"
-                        }
+
+                    statusIcon()
+                    Column {
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = if (uiState.aiModelState == AiModelState.ERROR)
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                        )
                     }
                 }
 
-                statusIcon()
-                Column {
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = if (uiState.aiModelState == AiModelState.ERROR)
-                            MaterialTheme.colorScheme.error
-                        else
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                    )
+                if (uiState.aiModelState == AiModelState.READY && uiState.isLoading) {
+                    IconButton(
+                        onClick = onCancelParsing,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel parsing",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
                 }
             }
 
@@ -720,7 +894,7 @@ fun DailyBurnRateCard(
 
 // ─── Top Destinations ───
 @Composable
-fun TopDestinationsRow(transactions: List<Transaction>, modifier: Modifier = Modifier) {
+fun TopDestinationsRow(transactions: List<Transaction>, onNavigateToDrillDown: (EntityType, String) -> Unit, modifier: Modifier = Modifier) {
     val topMerchants = transactions
         .filter { it.type.equals("DEBIT", ignoreCase = true) }
         .groupBy { it.merchant }
@@ -747,7 +921,7 @@ fun TopDestinationsRow(transactions: List<Transaction>, modifier: Modifier = Mod
         ) {
             topMerchants.forEach { (merchant, count, spent) ->
                 Card(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).clickable { onNavigateToDrillDown(EntityType.MERCHANT, merchant) },
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -778,16 +952,82 @@ fun TopDestinationsRow(transactions: List<Transaction>, modifier: Modifier = Mod
     }
 }
 
+// ─── Top Categories ───
+@Composable
+fun TopCategoriesRow(transactions: List<Transaction>, onNavigateToDrillDown: (EntityType, String) -> Unit, modifier: Modifier = Modifier) {
+    val topCategories = transactions
+        .filter { it.type.equals("DEBIT", ignoreCase = true) && !it.category.equals("Unknown", ignoreCase = true) }
+        .groupBy { it.category }
+        .map { entry ->
+            Triple(entry.key, entry.value.size, entry.value.sumOf { it.amount })
+        }
+        .sortedByDescending { it.third }
+        .take(3)
+
+    if (topCategories.isEmpty()) return
+
+    val financeColors = SpentAnalyserThemeExtensions.financeColors
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = "Top Categories",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            topCategories.forEach { (category, count, spent) ->
+                Card(
+                    modifier = Modifier.weight(1f).clickable { onNavigateToDrillDown(EntityType.CATEGORY, category) },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = category,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "$count txns",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "−₹${"%.0f".format(spent)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = financeColors.debit
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Recent Transaction Item ───
 @Composable
-fun RecentTransactionItem(transaction: Transaction, modifier: Modifier = Modifier) {
+fun RecentTransactionItem(
+    transaction: Transaction,
+    onMerchantClick: (String) -> Unit = {},
+    onCategoryClick: (String) -> Unit = {},
+    onClick: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
     val financeColors = SpentAnalyserThemeExtensions.financeColors
     val isCredit = transaction.type.equals("CREDIT", ignoreCase = true)
     val amountColor = if (isCredit) financeColors.credit else financeColors.debit
     val amountPrefix = if (isCredit) "+" else "−"
 
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().clickable { onClick() },
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp
@@ -819,13 +1059,24 @@ fun RecentTransactionItem(transaction: Transaction, modifier: Modifier = Modifie
                     text = transaction.merchant,
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    modifier = Modifier.clickable { onMerchantClick(transaction.merchant) }
                 )
-                Text(
-                    text = transaction.date,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = transaction.category,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { onCategoryClick(transaction.category) }
+                    )
+                    Text(
+                        text = " · ${transaction.date}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Text(

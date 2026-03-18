@@ -7,8 +7,8 @@ interface ModelRepository {
     /** Observable list of all known models with their current download/active state. */
     fun getAvailableModelsFlow(): Flow<List<LlmModel>>
 
-    /** Download a model file, reporting progress (0–100). */
-    suspend fun downloadModel(model: LlmModel, onProgress: (Int) -> Unit)
+    /** Enqueues a background WorkManager task to download a model file. */
+    fun enqueueDownloadWork(model: LlmModel)
 
     /** Delete a downloaded model file from disk. */
     suspend fun deleteModel(model: LlmModel)
@@ -30,4 +30,7 @@ interface ModelRepository {
 
     /** Automatically initialize the provided engine with the saved active model and GPU settings (if any exist). */
     suspend fun autoInitializeEngine(engine: com.oracle.ee.spentanalyser.domain.engine.LlmInferenceEngine)
+
+    /** Force a refresh of the local model state. */
+    fun forceRefreshState()
 }

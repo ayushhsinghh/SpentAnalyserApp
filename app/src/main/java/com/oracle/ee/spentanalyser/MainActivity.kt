@@ -36,6 +36,13 @@ import com.oracle.ee.spentanalyser.presentation.monitoring.MonitoringScreen
 import com.oracle.ee.spentanalyser.presentation.monitoring.MonitoringViewModel
 import com.oracle.ee.spentanalyser.presentation.transactions.TransactionsScreen
 import com.oracle.ee.spentanalyser.presentation.transactions.TransactionsViewModel
+import com.oracle.ee.spentanalyser.presentation.analytics.DrillDownScreen
+import com.oracle.ee.spentanalyser.presentation.analytics.DrillDownViewModel
+import com.oracle.ee.spentanalyser.presentation.analytics.EntityType
+import com.oracle.ee.spentanalyser.presentation.inbox.InboxScreen
+import com.oracle.ee.spentanalyser.presentation.inbox.InboxViewModel
+import com.oracle.ee.spentanalyser.presentation.settings.SettingsScreen
+import com.oracle.ee.spentanalyser.presentation.settings.SettingsViewModel
 import com.oracle.ee.spentanalyser.ui.navigation.Screen
 import com.oracle.ee.spentanalyser.ui.navigation.bottomNavItems
 import com.oracle.ee.spentanalyser.ui.navigation.drawerItems
@@ -50,11 +57,18 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val readSmsGranted = permissions[Manifest.permission.READ_SMS] ?: false
         val receiveSmsGranted = permissions[Manifest.permission.RECEIVE_SMS] ?: false
+        val notificationsGranted = permissions[Manifest.permission.POST_NOTIFICATIONS] ?: false
 
         if (readSmsGranted && receiveSmsGranted) {
             Timber.d("SMS Permissions granted. Continuing...")
         } else {
             Timber.w("SMS Permissions denied.")
+        }
+        
+        if (notificationsGranted) {
+            Timber.d("Notification Permissions granted. Model downloading will show foreground indicators.")
+        } else {
+            Timber.w("Notification Permissions denied. Downloading will run silently and might be killed.")
         }
     }
 
@@ -62,10 +76,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         requestPermissionLauncher.launch(
-            arrayOf(
-                Manifest.permission.READ_SMS,
-                Manifest.permission.RECEIVE_SMS
-            )
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                arrayOf(
+                    Manifest.permission.READ_SMS,
+                    Manifest.permission.RECEIVE_SMS,
+                    Manifest.permission.POST_NOTIFICATIONS
+                )
+            } else {
+                arrayOf(
+                    Manifest.permission.READ_SMS,
+                    Manifest.permission.RECEIVE_SMS
+                )
+            }
         )
 
         enableEdgeToEdge()
@@ -82,7 +104,9 @@ class MainActivity : ComponentActivity() {
                             modelRepository = appContainer.modelRepository,
                             llmEngine = appContainer.llmEngine,
                             parseSmsUseCase = appContainer.parseSmsUseCase,
-                            workManager = appContainer.workManager
+                            workManager = appContainer.workManager,
+                            preferencesManager = appContainer.preferencesManager,
+                            smsLogRepository = appContainer.smsLogRepository
                         ) as T
                     }
                 }
@@ -102,7 +126,8 @@ class MainActivity : ComponentActivity() {
                     override fun <T : ViewModel> create(modelClass: Class<T>): T {
                         return LogsViewModel(
                             smsLogRepository = appContainer.smsLogRepository,
-                            transactionRepository = appContainer.transactionRepository
+                            transactionRepository = appContainer.transactionRepository,
+                            parseSmsUseCase = appContainer.parseSmsUseCase
                         ) as T
                     }
                 }
@@ -127,11 +152,46 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val drillDownFactory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                        return DrillDownViewModel(
+                            transactionRepository = appContainer.transactionRepository,
+                            smsLogRepository = appContainer.smsLogRepository
+                        ) as T
+                    }
+                }
+
+                val settingsFactory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                        return SettingsViewModel(
+                            preferencesManager = appContainer.preferencesManager,
+                            transactionRepository = appContainer.transactionRepository,
+                            smsLogRepository = appContainer.smsLogRepository
+                        ) as T
+                    }
+                }
+
+                val inboxFactory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                        return InboxViewModel(
+                            smsInboxDataSource = appContainer.smsInboxDataSource,
+                            smsLogRepository = appContainer.smsLogRepository,
+                            parseSmsUseCase = appContainer.parseSmsUseCase
+                        ) as T
+                    }
+                }
+
                 val dashboardViewModel: DashboardViewModel = viewModel(factory = dashboardFactory)
                 val transactionsViewModel: TransactionsViewModel = viewModel(factory = transactionsFactory)
                 val logsViewModel: LogsViewModel = viewModel(factory = logsFactory)
                 val modelsViewModel: ModelsViewModel = viewModel(factory = modelsFactory)
                 val monitoringViewModel: MonitoringViewModel = viewModel(factory = monitoringFactory)
+                val drillDownViewModel: DrillDownViewModel = viewModel(factory = drillDownFactory)
+                val settingsViewModel: SettingsViewModel = viewModel(factory = settingsFactory)
+                val inboxViewModel: InboxViewModel = viewModel(factory = inboxFactory)
 
                 SpentAnalyserApp(
                     dashboardViewModel = dashboardViewModel,
@@ -139,6 +199,9 @@ class MainActivity : ComponentActivity() {
                     logsViewModel = logsViewModel,
                     modelsViewModel = modelsViewModel,
                     monitoringViewModel = monitoringViewModel,
+                    drillDownViewModel = drillDownViewModel,
+                    settingsViewModel = settingsViewModel,
+                    inboxViewModel = inboxViewModel,
                     preferencesManager = appContainer.preferencesManager
                 )
             }
@@ -154,6 +217,9 @@ fun SpentAnalyserApp(
     logsViewModel: LogsViewModel,
     modelsViewModel: ModelsViewModel,
     monitoringViewModel: MonitoringViewModel,
+    drillDownViewModel: DrillDownViewModel,
+    settingsViewModel: SettingsViewModel,
+    inboxViewModel: InboxViewModel,
     preferencesManager: com.oracle.ee.spentanalyser.data.database.PreferencesManager
 ) {
     val navController = rememberNavController()
@@ -210,36 +276,6 @@ fun SpentAnalyserApp(
                 }
                 
                 Spacer(modifier = Modifier.weight(1f))
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                
-                // Auto-parsing toggle setting
-                val isAutoParsingEnabled by preferencesManager.isAutoParsingEnabledFlow.collectAsState(initial = true)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Background Auto-Parsing",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = if (isAutoParsingEnabled) "ON - Processing new SMS" else "OFF - Not processing",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = isAutoParsingEnabled,
-                        onCheckedChange = { isEnabled ->
-                            scope.launch { preferencesManager.setAutoParsingEnabled(isEnabled) }
-                        }
-                    )
-                }
             }
         },
     ) {
@@ -344,10 +380,20 @@ fun SpentAnalyserApp(
             ) {
                 // Bottom Nav destinations
                 composable(Screen.Dashboard.route) {
-                    DashboardScreen(viewModel = dashboardViewModel)
+                    DashboardScreen(
+                        viewModel = dashboardViewModel,
+                        onNavigateToDrillDown = { type, name ->
+                            navController.navigate(Screen.DrillDown.createRoute(type.name, name))
+                        }
+                    )
                 }
                 composable(Screen.Transactions.route) {
-                    TransactionsScreen(viewModel = transactionsViewModel)
+                    TransactionsScreen(
+                        viewModel = transactionsViewModel,
+                        onNavigateToDrillDown = { type, name ->
+                            navController.navigate(Screen.DrillDown.createRoute(type.name, name))
+                        }
+                    )
                 }
 
                 // Drawer destinations
@@ -359,6 +405,33 @@ fun SpentAnalyserApp(
                 }
                 composable(Screen.Logs.route) {
                     LogsScreen(viewModel = logsViewModel)
+                }
+                composable(Screen.Settings.route) {
+                    SettingsScreen(viewModel = settingsViewModel)
+                }
+                composable(Screen.Inbox.route) {
+                    InboxScreen(viewModel = inboxViewModel)
+                }
+
+                // Dynamic destinations
+                composable(Screen.DrillDown.route) { backStackEntry ->
+                    val typeStr = backStackEntry.arguments?.getString("type") ?: "MERCHANT"
+                    val name = backStackEntry.arguments?.getString("name") ?: ""
+                    
+                    val type = try {
+                        EntityType.valueOf(typeStr)
+                    } catch (e: Exception) {
+                        EntityType.MERCHANT
+                    }
+                    
+                    // Initialize the viewmodel only once per destination if possible, 
+                    // or just init it on load (LaunchEffect in screen)
+                    DrillDownScreen(
+                        viewModel = drillDownViewModel,
+                        entityType = type,
+                        entityName = name,
+                        onBack = { navController.popBackStack() }
+                    )
                 }
             }
         }

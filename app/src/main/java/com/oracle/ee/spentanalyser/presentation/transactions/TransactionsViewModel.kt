@@ -3,9 +3,13 @@ package com.oracle.ee.spentanalyser.presentation.transactions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.oracle.ee.spentanalyser.domain.model.Transaction
+import com.oracle.ee.spentanalyser.domain.model.TransactionFilterQuery
 import com.oracle.ee.spentanalyser.domain.repository.TransactionRepository
+import com.oracle.ee.spentanalyser.domain.util.MerchantNormalizer
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -15,14 +19,33 @@ class TransactionsViewModel(
     private val smsLogRepository: com.oracle.ee.spentanalyser.domain.repository.SmsLogRepository
 ) : ViewModel() {
 
-    val transactions: StateFlow<List<Transaction>> =
-        transactionRepository.getAllTransactionsFlow()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _filterQuery = MutableStateFlow(TransactionFilterQuery())
+    val filterQuery: StateFlow<TransactionFilterQuery> = _filterQuery
 
-    fun updateExistingTransaction(transaction: Transaction) {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val transactions: StateFlow<List<Transaction>> = _filterQuery
+        .flatMapLatest { query ->
+            transactionRepository.searchTransactions(query)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateFilterQuery(query: TransactionFilterQuery) {
+        _filterQuery.value = query
+    }
+
+    fun updateExistingTransaction(transaction: Transaction, originalMerchant: String? = null) {
         viewModelScope.launch {
             try {
-                transactionRepository.updateTransaction(transaction)
+                // If the user changed the merchant string via manual edit, save it as an alias mapping!
+                if (originalMerchant != null && originalMerchant != transaction.merchant) {
+                    transactionRepository.saveMerchantMapping(
+                        alias = originalMerchant,
+                        normalizedName = transaction.merchant
+                    )
+                }
+
+                val normalizedTx = transaction.copy(merchant = transactionRepository.getNormalizedMerchantOrDefault(transaction.merchant))
+                transactionRepository.updateTransaction(normalizedTx)
             } catch (e: Exception) {
                 Timber.e(e, "Error updating transaction")
             }

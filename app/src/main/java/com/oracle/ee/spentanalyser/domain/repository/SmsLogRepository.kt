@@ -10,4 +10,5 @@ interface SmsLogRepository {
     suspend fun doesSmsLogExist(hash: String): Boolean
     suspend fun updateSmsLogStatus(hash: String, status: ParseStatus)
     suspend fun getSmsLogByHash(hash: String): SmsLog?
+    suspend fun clearAllSmsLogs()
 }
